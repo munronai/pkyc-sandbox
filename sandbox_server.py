@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Dict, List, Literal, Optional
 import httpx
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from mcp.server.mcpserver import MCPServer
@@ -16,7 +17,10 @@ from live_feeds import (
     fetch_opensanctions,
 )
 
-app = FastAPI(title="munron pKYC Simulation Sandbox", version="2.0.0")
+# Load local .env file if present (for TYPESAFE_API_KEY, etc.)
+load_dotenv()
+
+app = FastAPI(title="Xapien + Jev pKYC Simulation Sandbox", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -303,6 +307,26 @@ URGENCY_LEVELS = [
     "4_Critical_Auto_Trigger_Full_Report",
 ]
 
+# Ordered level descriptions required by TypeSafe AI Jev Score `criteria` (levels 0 to 4)
+URGENCY_SCORE_CRITERIA = [
+    "Irrelevant false positive (wrong entity/namesake) or duplicate syndicated echo of an event already in the baseline summary",
+    "Routine administrative corporate filing (such as an address move or minor form) requiring silent audit logging only",
+    "Low-severity operational update suitable for a weekly digest without regenerating the due diligence report",
+    "Moderate, credible regulatory inquiry, customs probe, or adverse media allegation warranting customer notification to approve a report refresh",
+    "Critical watchlist/sanctions match, criminal indictment, insolvency, or high-risk UBO change requiring immediate automatic report regeneration",
+]
+
+# Option map required by TypeSafe AI Jev Choice `criteria`
+RISK_CATEGORY_CRITERIA = {
+    "Sanctions_PEP": "Direct or indirect sanctions list match, watchlist hit, or Politically Exposed Person (PEP) exposure",
+    "Financial_Crime": "Fraud, money laundering, bribery, tax evasion, or criminal indictment",
+    "Corporate_UBO_Change": "Change in beneficial ownership (PSC/UBO), directors, or corporate control structure",
+    "Insolvency": "Bankruptcy, winding-up petition, administration, or severe liquidity distress",
+    "ESG_Reputational": "Regulatory inquiry, customs/compliance probe, environmental/labor violation, or adverse media controversy",
+    "Routine_Admin": "Standard administrative filing such as a registered office address move or annual confirmation statement",
+    "Benign_Unrelated": "Unrelated namesake entity or benign non-risk news",
+}
+
 
 async def evaluate_delta_with_jev(
     entity: MonitoredEntity,
@@ -311,12 +335,13 @@ async def evaluate_delta_with_jev(
     scenario_hint: Optional[str] = None,
 ) -> JevEvaluation:
     """
-    Constructs the exact TypeSafe AI Jev payload (`noul`, `choice`, `score`).
+    Constructs the official TypeSafe AI Jev `/v1/systemone` payload (`noul`, `choice`, `score`
+    using `instructions` and `criteria` per https://docs.typesafe.ai/introduction/quickstart).
     Routes to live TypeSafe AI Jev API when policy.jev_mode == "live"; otherwise runs deterministic calibrated simulation.
     """
     latest_report = entity.reports[-1]
     jev_payload = {
-        "model": "jev-latest",
+        "model": os.getenv("TYPESAFE_MODEL", "jev-latest"),
         "state": {
             "monitored_entity": {
                 "name": entity.name,
@@ -325,40 +350,49 @@ async def evaluate_delta_with_jev(
                 "known_officers": entity.known_officers,
                 "baseline_risk_summary": latest_report.executive_summary,
             },
-            "client_policy": policy.model_dump(),
+            "client_policy": {
+                "sector": policy.sector,
+                "risk_appetite": policy.risk_appetite,
+            },
             "incoming_delta": record.model_dump(),
         },
         "questions": {
             "is_same_entity": {
                 "type": "noul",
-                "question": "Does incoming_delta refer to the exact monitored_entity or its known_officers?",
+                "instructions": (
+                    "Does incoming_delta refer to the exact monitored_entity "
+                    "(matching jurisdiction, company number, or industry) or its known_officers (matching birth year/identity)?"
+                ),
+                "criteria": {
+                    "true": "Refers to the exact monitored_entity or one of its known_officers",
+                    "false": "Refers to a different company or a namesake individual with a conflicting birth year, age, or jurisdiction",
+                },
             },
             "is_net_new_event": {
                 "type": "noul",
-                "question": "Does incoming_delta describe a new event NOT already covered in baseline_risk_summary?",
+                "instructions": "Does incoming_delta describe a net-new event or filing that is NOT already covered in baseline_risk_summary?",
+                "criteria": {
+                    "true": "Describes a new incident, filing, or allegation not already mentioned in baseline_risk_summary",
+                    "false": "Re-reports, summarizes, or echoes a past fine or event already mentioned in baseline_risk_summary",
+                },
             },
             "risk_category": {
                 "type": "choice",
-                "question": "Which primary risk category describes incoming_delta?",
-                "choices": [
-                    "Sanctions_PEP",
-                    "Financial_Crime",
-                    "Corporate_UBO_Change",
-                    "Insolvency",
-                    "ESG_Reputational",
-                    "Routine_Admin",
-                    "Benign_Unrelated",
-                ],
+                "instructions": "Which primary compliance risk category best describes incoming_delta?",
+                "criteria": RISK_CATEGORY_CRITERIA,
             },
             "regeneration_urgency": {
                 "type": "score",
-                "question": "Given client_policy, how urgently does this update warrant paying for a full due diligence report regeneration?",
-                "levels": URGENCY_LEVELS,
+                "instructions": (
+                    "Assuming incoming_delta is about the monitored entity and is net-new, how severe is this event and "
+                    "how urgently does it warrant regenerating the full due diligence report given client_policy?"
+                ),
+                "criteria": URGENCY_SCORE_CRITERIA,
             },
         },
     }
 
-    api_key = os.getenv("TYPESAFE_API_KEY")
+    api_key = os.getenv("TYPESAFE_API_KEY", "").strip().strip('"').strip("'")
     engine_used: Literal["JEV_SIMULATED", "JEV_LIVE_API"] = "JEV_SIMULATED"
 
     # Route to Live TypeSafe AI Jev API when policy.jev_mode == "live"
@@ -366,43 +400,91 @@ async def evaluate_delta_with_jev(
         if not api_key:
             raise HTTPException(
                 status_code=400,
-                detail="Jev Mode is set to 'live', but TYPESAFE_API_KEY environment variable is not set.",
+                detail="Jev Mode is set to 'live', but TYPESAFE_API_KEY is not set in the environment or .env file.",
             )
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.post(
-                os.getenv("TYPESAFE_API_URL", "https://api.typesafe.ai/v1/evaluate"),
-                headers={"Authorization": f"Bearer {api_key}"},
-                json=jev_payload,
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        api_url = os.getenv("TYPESAFE_API_URL", "https://api.typesafe.ai/v1/systemone")
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(
+                    api_url,
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=jev_payload,
+                )
+                if resp.status_code != 200:
+                    raise HTTPException(
+                        status_code=resp.status_code,
+                        detail=f"TypeSafe AI Jev API error ({resp.status_code}) at {api_url}: {resp.text}",
+                    )
+                data = resp.json()
+        except HTTPException:
+            raise
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Failed to reach live TypeSafe AI Jev API at {api_url}: {exc}",
+            ) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Unexpected error calling live TypeSafe AI Jev API: {exc}",
+            ) from exc
 
-            # Support both direct question keys and nested 'answers'/'results' objects
+        try:
+            # Parse official TypeSafe AI `/v1/systemone` response structure:
+            # answers["<id>"]["noul"] (float 0..1), answers["<id>"]["choice"] (str), answers["<id>"]["score"] (float 0..N-1)
             answers = data.get("answers", data.get("results", data))
+
+            same_ans = answers["is_same_entity"]
             same_prob = float(
-                answers["is_same_entity"].get(
-                    "probability", answers["is_same_entity"].get("true_prob", 0.5)
+                same_ans.get(
+                    "noul",
+                    same_ans.get("probability", same_ans.get("true_prob", 0.5)),
                 )
             )
+
+            new_ans = answers["is_net_new_event"]
             new_prob = float(
-                answers["is_net_new_event"].get(
-                    "probability", answers["is_net_new_event"].get("true_prob", 0.5)
+                new_ans.get(
+                    "noul",
+                    new_ans.get("probability", new_ans.get("true_prob", 0.5)),
                 )
             )
-            category = answers["risk_category"].get(
-                "top_choice",
-                answers["risk_category"].get("choice", "ESG_Reputational"),
+
+            cat_ans = answers["risk_category"]
+            category = str(
+                cat_ans.get("choice", cat_ans.get("top_choice", "ESG_Reputational"))
             )
-            urgency_level = answers["regeneration_urgency"].get(
-                "top_level", URGENCY_LEVELS[2]
-            )
-            worth_score = float(
-                answers["regeneration_urgency"].get(
-                    "calibrated_score",
-                    answers["regeneration_urgency"].get("expected_score", 0.5),
+
+            urg_ans = answers["regeneration_urgency"]
+            max_level_idx = len(URGENCY_LEVELS) - 1  # 4
+            if "score" in urg_ans:
+                raw_score = float(urg_ans["score"])
+                # Score in TypeSafe AI is 0..(len(criteria)-1); normalize to 0.0..1.0
+                worth_score = max(0.0, min(1.0, raw_score / max_level_idx))
+                level_idx = max(0, min(max_level_idx, int(round(raw_score))))
+                urgency_level = URGENCY_LEVELS[level_idx]
+            else:
+                worth_score = float(
+                    urg_ans.get("calibrated_score", urg_ans.get("expected_score", 0.5))
                 )
-            )
+                urgency_level = str(urg_ans.get("top_level", URGENCY_LEVELS[2]))
+
+            # Discount materiality score if identity match or novelty is near zero
+            if (
+                same_prob < policy.disambiguation_cutoff
+                or new_prob < policy.novelty_cutoff
+            ):
+                worth_score = round(worth_score * min(same_prob, new_prob), 4)
+
             engine_used = "JEV_LIVE_API"
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Unable to parse TypeSafe AI Jev response payload: {exc} | Raw response: {data}",
+            ) from exc
     else:
         # Calibrated System 1 Simulation for Offline Demo
         same_prob, new_prob, category, urgency_level, worth_score = (
@@ -428,11 +510,11 @@ async def evaluate_delta_with_jev(
 
     return JevEvaluation(
         engine_used=engine_used,
-        is_same_entity_prob=same_prob,
-        is_net_new_event_prob=new_prob,
+        is_same_entity_prob=round(same_prob, 4),
+        is_net_new_event_prob=round(new_prob, 4),
         risk_category=category,
         regeneration_urgency_level=urgency_level,
-        worth_a_report_score=worth_score,
+        worth_a_report_score=round(worth_score, 4),
         action_taken=action,
         reasoning_note=note,
     )
@@ -568,6 +650,8 @@ async def process_incoming_delta(req: InjectDeltaRequest) -> dict:
             detail="Provide either a valid scenario_preset or custom_record",
         )
 
+    # If live Jev fails, evaluate_delta_with_jev raises an HTTPException cleanly
+    # before mutating entity.event_stream or saving corrupted state.
     jev_eval = await evaluate_delta_with_jev(
         entity, record, STORE.policy, scenario_label
     )
@@ -794,14 +878,27 @@ async def poll_live_entity_feeds(entity_id: str = "ent_apex_01", timespan: str =
         timespan=timespan,
     )
     results = []
+    errors = []
     for rec in live_records:
-        res = await process_incoming_delta(
-            InjectDeltaRequest(
-                entity_id=entity_id, scenario_preset=None, custom_record=rec
+        try:
+            res = await process_incoming_delta(
+                InjectDeltaRequest(
+                    entity_id=entity_id, scenario_preset=None, custom_record=rec
+                )
             )
-        )
-        results.append(res["event"])
-    return {"polled_records_count": len(results), "evaluated_events": results}
+            results.append(res["event"])
+        except HTTPException as exc:
+            errors.append(str(exc.detail))
+            break
+
+    if errors and not results:
+        raise HTTPException(status_code=502, detail=errors[0])
+
+    return {
+        "polled_records_count": len(results),
+        "evaluated_events": results,
+        "warning": errors[0] if errors else None,
+    }
 
 
 @app.post("/api/v1/entities/onboard-live")

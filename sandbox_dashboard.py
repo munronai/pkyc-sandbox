@@ -35,15 +35,30 @@ def st_mermaid(mermaid_code: str, height: int = 620):
 if "active_entity_id" not in st.session_state:
     st.session_state["active_entity_id"] = "ent_apex_01"
 
+if "last_api_error" not in st.session_state:
+    st.session_state["last_api_error"] = None
+
 # =====================================================================
-# API CLIENT HELPERS
+# API CLIENT HELPERS (NON-BLOCKING ERROR HANDLING)
 # =====================================================================
+
+
+def _extract_error_detail(res: httpx.Response) -> str:
+    try:
+        payload = res.json()
+        if isinstance(payload, dict) and "detail" in payload:
+            return str(payload["detail"])
+    except Exception:
+        pass
+    return res.text
 
 
 def api_get_entities():
     try:
         with httpx.Client(timeout=10.0) as client:
-            return client.get(f"{API_BASE}/entities").json()
+            res = client.get(f"{API_BASE}/entities")
+            res.raise_for_status()
+            return res.json()
     except Exception as e:
         st.error(f"Waiting for Sandbox API at {API_BASE}... ({e})")
         st.stop()
@@ -62,57 +77,109 @@ def api_inject_scenario(entity_id: str, preset: str = None, custom_record: dict 
         "scenario_preset": preset,
         "custom_record": custom_record,
     }
-    with httpx.Client(timeout=20.0) as client:
-        res = client.post(f"{API_BASE}/sandbox/inject-delta", json=payload)
-        if res.status_code != 200:
-            st.error(f"Jev Evaluation Error: {res.text}")
-            st.stop()
-        return res.json()
+    try:
+        with httpx.Client(timeout=20.0) as client:
+            res = client.post(f"{API_BASE}/sandbox/inject-delta", json=payload)
+            if res.status_code != 200:
+                st.session_state["last_api_error"] = (
+                    f"Jev Evaluation Error ({res.status_code}): {_extract_error_detail(res)}"
+                )
+                return None
+            st.session_state["last_api_error"] = None
+            return res.json()
+    except Exception as e:
+        st.session_state["last_api_error"] = f"Jev Evaluation Request Failed: {e}"
+        return None
 
 
 def api_poll_live_feeds(entity_id: str, timespan: str = "1w"):
-    with httpx.Client(timeout=25.0) as client:
-        res = client.post(
-            f"{API_BASE}/entities/{entity_id}/poll-live-feeds",
-            params={"timespan": timespan},
-        )
-        res.raise_for_status()
-        return res.json()
+    try:
+        with httpx.Client(timeout=25.0) as client:
+            res = client.post(
+                f"{API_BASE}/entities/{entity_id}/poll-live-feeds",
+                params={"timespan": timespan},
+            )
+            if res.status_code != 200:
+                st.session_state["last_api_error"] = (
+                    f"Live Feed Poll Error ({res.status_code}): {_extract_error_detail(res)}"
+                )
+                return None
+            data = res.json()
+            if data.get("warning"):
+                st.session_state["last_api_error"] = (
+                    f"Live Feed Poll Warning: {data['warning']}"
+                )
+            else:
+                st.session_state["last_api_error"] = None
+            return data
+    except Exception as e:
+        st.session_state["last_api_error"] = f"Live Feed Poll Failed: {e}"
+        return None
 
 
 def api_onboard_live(company_name: str, company_number: str = None):
-    with httpx.Client(timeout=30.0) as client:
-        res = client.post(
-            f"{API_BASE}/entities/onboard-live",
-            json={
-                "company_name": company_name,
-                "company_number": company_number or None,
-                "jurisdiction": "GB",
-            },
-        )
-        res.raise_for_status()
-        return res.json()
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            res = client.post(
+                f"{API_BASE}/entities/onboard-live",
+                json={
+                    "company_name": company_name,
+                    "company_number": company_number or None,
+                    "jurisdiction": "GB",
+                },
+            )
+            if res.status_code != 200:
+                st.session_state["last_api_error"] = (
+                    f"Live Onboarding Error ({res.status_code}): {_extract_error_detail(res)}"
+                )
+                return None
+            st.session_state["last_api_error"] = None
+            return res.json()
+    except Exception as e:
+        st.session_state["last_api_error"] = f"Live Onboarding Failed: {e}"
+        return None
 
 
 def api_approve_refresh(entity_id: str):
-    with httpx.Client(timeout=20.0) as client:
-        return client.post(f"{API_BASE}/entities/{entity_id}/approve-refresh").json()
+    try:
+        with httpx.Client(timeout=20.0) as client:
+            res = client.post(f"{API_BASE}/entities/{entity_id}/approve-refresh")
+            if res.status_code != 200:
+                st.session_state["last_api_error"] = (
+                    f"Approve Refresh Error ({res.status_code}): {_extract_error_detail(res)}"
+                )
+                return None
+            st.session_state["last_api_error"] = None
+            return res.json()
+    except Exception as e:
+        st.session_state["last_api_error"] = f"Approve Refresh Failed: {e}"
+        return None
 
 
 def api_update_policy(policy_dict: dict):
-    with httpx.Client(timeout=10.0) as client:
-        return client.put(
-            f"{API_BASE}/sandbox/policy-thresholds", json=policy_dict
-        ).json()
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            res = client.put(f"{API_BASE}/sandbox/policy-thresholds", json=policy_dict)
+            if res.status_code != 200:
+                st.session_state["last_api_error"] = (
+                    f"Policy Update Error ({res.status_code}): {_extract_error_detail(res)}"
+                )
+                return None
+            st.session_state["last_api_error"] = None
+            return res.json()
+    except Exception as e:
+        st.session_state["last_api_error"] = f"Policy Update Failed: {e}"
+        return None
 
 
 def api_reset_sandbox():
     with httpx.Client(timeout=10.0) as client:
         client.post(f"{API_BASE}/sandbox/reset")
     st.session_state["active_entity_id"] = "ent_apex_01"
+    st.session_state["last_api_error"] = None
     # Clear any Streamlit memo/session caches if present
     for key in list(st.session_state.keys()):
-        if key != "active_entity_id":
+        if key not in ("active_entity_id", "last_api_error"):
             del st.session_state[key]
 
 
@@ -569,6 +636,7 @@ def render_dashboard_page():
         )
         if selected_eid != ENTITY_ID:
             st.session_state["active_entity_id"] = selected_eid
+            st.session_state["last_api_error"] = None
             st.rerun()
 
         # 2. Onboard Real Company or Poll Live Feeds
@@ -582,10 +650,11 @@ def render_dashboard_page():
                 f"Polling live GDELT, Companies House & OpenSanctions for {stream_data['name']}..."
             ):
                 res = api_poll_live_feeds(ENTITY_ID, timespan="1m")
-            st.toast(
-                f"Polled {res['polled_records_count']} live records through Jev!",
-                icon="🌐",
-            )
+            if res is not None:
+                st.toast(
+                    f"Polled {res['polled_records_count']} live records through Jev!",
+                    icon="🌐",
+                )
             st.rerun()
 
         with st.expander("🔍 Onboard Real UK Company (Live)"):
@@ -600,7 +669,8 @@ def render_dashboard_page():
                     f"Fetching Companies House PSCs, OpenSanctions & GDELT for {live_name}..."
                 ):
                     created = api_onboard_live(live_name, live_num)
-                    st.session_state["active_entity_id"] = created["entity_id"]
+                    if created and "entity_id" in created:
+                        st.session_state["active_entity_id"] = created["entity_id"]
                 st.rerun()
 
         st.divider()
@@ -746,7 +816,7 @@ def render_dashboard_page():
             if st.form_submit_button(
                 "Save Engine Mode & Thresholds", use_container_width=True
             ):
-                api_update_policy(
+                updated = api_update_policy(
                     {
                         "jev_mode": new_jev_mode,
                         "sector": policy["sector"],
@@ -757,13 +827,27 @@ def render_dashboard_page():
                         "auto_regen_threshold": new_autoregen,
                     }
                 )
-                st.toast("Engine mode & policy thresholds updated!", icon="✅")
+                if updated is not None:
+                    st.toast("Engine mode & policy thresholds updated!", icon="✅")
                 st.rerun()
 
         st.divider()
         if st.button("🔄 Reset Sandbox to v1 Baseline", use_container_width=True):
             api_reset_sandbox()
             st.rerun()
+
+    # =====================================================================
+    # NON-BLOCKING ERROR BANNER (KEEPS DASHBOARD USABLE ON API FAILURE)
+    # =====================================================================
+
+    if st.session_state.get("last_api_error"):
+        err_col, dismiss_col = st.columns([11, 1])
+        with err_col:
+            st.error(st.session_state["last_api_error"])
+        with dismiss_col:
+            if st.button("✖️", help="Dismiss error message"):
+                st.session_state["last_api_error"] = None
+                st.rerun()
 
     # =====================================================================
     # MAIN STAGE HEADER & TELEMETRY KPI BAR
@@ -855,8 +939,9 @@ def render_dashboard_page():
                     type="primary",
                     use_container_width=True,
                 ):
-                    api_approve_refresh(ENTITY_ID)
-                    st.toast("System 2 LLM synthesized updated report!", icon="🚀")
+                    res = api_approve_refresh(ENTITY_ID)
+                    if res is not None:
+                        st.toast("System 2 LLM synthesized updated report!", icon="🚀")
                     st.rerun()
 
     st.divider()
