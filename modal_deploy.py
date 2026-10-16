@@ -12,9 +12,22 @@ image = (
     .add_local_python_source("sandbox_server", "live_feeds", "sandbox_dashboard")
 )
 
+# Optional Modal Secret for Live Jev API, UK Companies House, and OpenSanctions keys:
+# Create once via CLI:
+#   modal secret create xapien-sandbox-secrets \
+#     TYPESAFE_API_KEY="your_jev_key" \
+#     COMPANIES_HOUSE_API_KEY="your_ch_key" \
+#     OPENSANCTIONS_API_KEY="your_os_key"
+# Then set USE_MODAL_SECRETS=1 when deploying, or uncomment the secret below.
+SANDBOX_SECRETS = (
+    [modal.Secret.from_name("xapien-sandbox-secrets")]
+    if os.getenv("USE_MODAL_SECRETS") == "1"
+    else []
+)
+
 
 # 1. Public REST API (/docs, /api/v1/*) + FastMCP Endpoint (/mcp/sse)
-@app.function(image=image, scaledown_window=120)
+@app.function(image=image, secrets=SANDBOX_SECRETS, scaledown_window=120)
 @modal.concurrent(max_inputs=50)
 @modal.asgi_app()
 def api():
@@ -61,7 +74,7 @@ def dashboard():
 
 
 # 3. Weekly Continuous Monitoring Pulse (Every Monday at 06:00 UTC)
-@app.function(image=image, schedule=modal.Cron("0 6 * * 1"))
+@app.function(image=image, secrets=SANDBOX_SECRETS, schedule=modal.Cron("0 6 * * 1"))
 async def weekly_pkyc_pulse():
     from sandbox_server import STORE, poll_live_entity_feeds
 

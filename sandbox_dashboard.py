@@ -62,28 +62,36 @@ def api_inject_scenario(entity_id: str, preset: str = None, custom_record: dict 
         "scenario_preset": preset,
         "custom_record": custom_record,
     }
-    with httpx.Client(timeout=15.0) as client:
-        return client.post(f"{API_BASE}/sandbox/inject-delta", json=payload).json()
+    with httpx.Client(timeout=20.0) as client:
+        res = client.post(f"{API_BASE}/sandbox/inject-delta", json=payload)
+        if res.status_code != 200:
+            st.error(f"Jev Evaluation Error: {res.text}")
+            st.stop()
+        return res.json()
 
 
 def api_poll_live_feeds(entity_id: str, timespan: str = "1w"):
     with httpx.Client(timeout=25.0) as client:
-        return client.post(
+        res = client.post(
             f"{API_BASE}/entities/{entity_id}/poll-live-feeds",
             params={"timespan": timespan},
-        ).json()
+        )
+        res.raise_for_status()
+        return res.json()
 
 
 def api_onboard_live(company_name: str, company_number: str = None):
     with httpx.Client(timeout=30.0) as client:
-        return client.post(
+        res = client.post(
             f"{API_BASE}/entities/onboard-live",
             json={
                 "company_name": company_name,
                 "company_number": company_number or None,
                 "jurisdiction": "GB",
             },
-        ).json()
+        )
+        res.raise_for_status()
+        return res.json()
 
 
 def api_approve_refresh(entity_id: str):
@@ -109,7 +117,7 @@ def api_reset_sandbox():
 
 
 # =====================================================================
-# PAGE 1: HOMEPAGE (OVERVIEW & HOW TO USE)
+# PAGE 1: HOMEPAGE (OVERVIEW, WALKTHROUGH & CUSTOM INJECTION GUIDE)
 # =====================================================================
 
 
@@ -123,8 +131,9 @@ def render_home_page():
         Welcome to the **Perpetual KYC (pKYC) & Enhanced Due Diligence Simulation Sandbox**. 
         Rather than rebuilding a static, point-in-time web scraper from scratch, this prototype is an interactive 
         **Compliance Time-Machine** designed to demonstrate how AI-native due diligence platforms (like Xapien) 
-        can transition from expensive one-off reports to **event-driven continuous monitoring** without bankrupting 
-        compute budgets or drowning analysts in false positives.
+        can transition from expensive one-off reports to **event-driven continuous monitoring**—allowing you to toggle 
+        between a **Deterministic Simulation Mode** and **Live TypeSafe AI Jev + Live Open-Data Feeds** 
+        (UK Companies House, OpenSanctions, and GDELT DOC 2.0).
         """)
 
     # Top Call-To-Action Navigation Cards
@@ -133,8 +142,8 @@ def render_home_page():
         with st.container(border=True):
             st.markdown("### 🎛️ Launch the Interactive Sandbox")
             st.write(
-                "Inject synthetic weekly feed deltas (or poll live UK Companies House, OpenSanctions, and GDELT data), "
-                "tune Jev confidence sliders, and watch System 1 vs. System 2 unit economics in real time."
+                "Select or onboard a real UK company, toggle between Simulated Jev and Live Jev API, "
+                "inject synthetic or custom events, and tune materiality thresholds in real time."
             )
             st.page_link(
                 page_dashboard,
@@ -198,11 +207,10 @@ def render_home_page():
     st.divider()
 
     # Guided Demo Walkthrough
-    st.markdown("## 🧪 Guided 5-Step Walkthrough (How to Test the Sandbox)")
+    st.markdown("## 🧪 Part 1: Guided 5-Step Walkthrough (Golden Persona)")
     st.markdown("""
-        Once you open the **Sandbox Dashboard**, you will see our baseline monitored entity: **Apex Global Logistics Ltd** 
-        (a clean UK freight forwarder with a resolved £1,500 HMRC administrative penalty from 2024, currently at **🟢 LOW RISK `v1`**). 
-        Use the **Sandbox Control Deck** in the left sidebar to test the 5 pre-built weekly scenarios in order:
+        Start with our pre-seeded Golden Persona (**Apex Global Logistics Ltd**, `10928374` — a clean UK freight forwarder 
+        with a resolved £1,500 HMRC administrative penalty from 2024, currently at **🟢 LOW RISK `v1`**) to see how the 5 preset scenarios behave:
 
         | Step | Scenario Button | What Happens Under the Hood | Business & Product Proof Point |
         | :--- | :--- | :--- | :--- |
@@ -212,6 +220,60 @@ def render_home_page():
         | **Step 4** | **4️⃣ Ambiguous Media** | Regional press alleges a customs inquiry at Port of Felixstowe. Jev scores `Worth-a-Report: 0.76`—queuing a yellow **Upsell Notification Banner**. | **Commercial Trigger:** Customer clicks *Approve & Refresh* to upgrade the report to **`v2` (🟠 HIGH RISK)**. |
         | **Step 5** | **5️⃣ Silent UBO + Sanctions** | A new PSC (*Dmitri Kovalev*) is added at Companies House, spawning a child check that hits **OpenSanctions**. Jev scores `0.97` (`>= 0.88` cutoff). | **2nd-Degree Network Catch:** Automatically triggers System 2 LLM synthesis to **`v3` (🔴 CRITICAL RISK)**. |
         """)
+
+    st.divider()
+
+    st.markdown(
+        "## 🛠️ Part 2: Guide to Onboarding Real Companies & Crafting Custom Injections"
+    )
+    st.markdown("""
+        To test **real companies** against **Live TypeSafe AI Jev**, follow this 3-step workflow in the **Live Sandbox Dashboard**:
+
+        1. **Onboard & Select the Real Company:** Open `🔍 Onboard Real UK Company (Live)` in the sidebar, enter a real company name (e.g., `Tesco PLC` or `Greggs PLC`) and its UK Companies House number, and click **Onboard & Select for Monitoring**. The server pulls live corporate filings, extracts real PSCs/UBOs into `known_officers`, screens them on OpenSanctions, and builds a `v1` Baseline Report.
+        2. **Switch Jev Engine Mode to `live`:** Under `🎚️ Jev Engine & Policy Sliders` in the sidebar, toggle **Jev Evaluation Mode** from `simulated` to `live` (requires `TYPESAFE_API_KEY` set in your environment).
+        3. **Craft Your Custom Injection (`➕ Create Custom Injection`):** Because Jev evaluates your custom text against the company's stored `name`, `company_number`, `known_officers`, and `baseline_risk_summary`, you can purposefully test each of Jev's four gates using the recipes below:
+        """)
+
+    g1, g2 = st.columns(2)
+    with g1:
+        with st.container(border=True):
+            st.markdown("#### 🛑 Recipe A: Trigger a Namesake Disambiguation Drop")
+            st.caption("Target Gate: `is_same_entity` (`Noul` < 0.65)")
+            st.markdown(
+                "**How to write it:** Use a similar brand name or a director's name, but include a **conflicting jurisdiction, "
+                "registration number, or birth year**.\n\n"
+                "*Example for Greggs PLC (UK):*\n"
+                "> `Greggs Industrial Holdings LLC (registered in Nevada, US, 2021) fined $600k by OSHA for warehouse violations.`"
+            )
+        with st.container(border=True):
+            st.markdown("#### ♻️ Recipe B: Trigger a Syndicated News Echo Drop")
+            st.caption("Target Gate: `is_net_new_event` (`Noul` < 0.50)")
+            st.markdown(
+                "**How to write it:** Look at an article or filing already listed in the company's `v1` Baseline Report "
+                "and paraphrase it as a retrospective blog post.\n\n"
+                "*Example:*\n"
+                "> `2026 Compliance Recap: Looking back at how [Company Name] resolved its earlier filing inquiry mentioned in our baseline summary.`"
+            )
+
+    with g2:
+        with st.container(border=True):
+            st.markdown("#### ⚠️ Recipe C: Trigger a Tier-2 Customer Approval Alert")
+            st.caption("Target Gate: `regeneration_urgency` (`Score` 0.65 – 0.87)")
+            st.markdown(
+                "**How to write it:** Include the **exact Company Name and UK Company Number** with a net-new, moderate "
+                "regulatory or ESG allegation (e.g., supply-chain audit, HMRC query, unexpected CFO departure).\n\n"
+                "*Example:*\n"
+                "> `UK Competition and Markets Authority (CMA) opens preliminary information request into [Company Name] (Co No. [Number]) regarding supplier pricing terms.`"
+            )
+        with st.container(border=True):
+            st.markdown("#### 🚨 Recipe D: Trigger a Tier-3 Critical Auto-Regeneration")
+            st.caption("Target Gate: `regeneration_urgency` (`Score` >= 0.88)")
+            st.markdown(
+                "**How to write it:** Select `OPENSANCTIONS`, reference the **exact Company Name or a real PSC/UBO name** "
+                "from the Corporate tab, and state a direct OFAC SDN, UK HMT Sanctions, or criminal indictment hit.\n\n"
+                "*Example:*\n"
+                "> `WATCHLIST MATCH: Newly appointed PSC of [Company Name] matched to UK HMT Consolidated Sanctions List (Score: 0.98).`"
+            )
 
 
 # =====================================================================
@@ -488,8 +550,6 @@ def render_dashboard_page():
     pending_queue = stream_data["pending_approval_queue"]
     audit_events = stream_data["audit_event_stream"]
 
-    # Sidebar Controls (Only rendered when on the Dashboard page)
-
     # =====================================================================
     # SIDEBAR: ENTITY SWITCHER, SANDBOX INJECTOR, LIVE POLL & SLIDERS
     # =====================================================================
@@ -497,19 +557,21 @@ def render_dashboard_page():
     with st.sidebar:
         st.title("🎛️ Sandbox Control Deck")
 
-        # Entity Selector
+        # 1. Select Monitored Company (Golden Persona or Onboarded Live Company)
         entity_options = list(entities_map.keys())
         selected_eid = st.selectbox(
-            "Monitored Entity",
+            "🏢 Active Monitored Entity",
             options=entity_options,
             index=entity_options.index(ENTITY_ID),
-            format_func=lambda eid: f"{entities_map[eid]['name']} ({eid})",
+            format_func=lambda eid: (
+                f"{entities_map[eid]['name']} ({entities_map[eid]['company_number']})"
+            ),
         )
         if selected_eid != ENTITY_ID:
             st.session_state["active_entity_id"] = selected_eid
             st.rerun()
 
-        # Live Open-Data Controls
+        # 2. Onboard Real Company or Poll Live Feeds
         st.subheader("🌐 Live Open-Data Feeds")
         if st.button(
             "📡 Poll Live Feeds Now (GDELT/CH/OS)",
@@ -517,7 +579,7 @@ def render_dashboard_page():
             help="Fetches real-time deltas from GDELT DOC 2.0, UK Companies House, and OpenSanctions",
         ):
             with st.spinner(
-                "Polling live GDELT, Companies House & OpenSanctions APIs..."
+                f"Polling live GDELT, Companies House & OpenSanctions for {stream_data['name']}..."
             ):
                 res = api_poll_live_feeds(ENTITY_ID, timespan="1m")
             st.toast(
@@ -529,48 +591,74 @@ def render_dashboard_page():
         with st.expander("🔍 Onboard Real UK Company (Live)"):
             live_name = st.text_input("Company Name", "Tesco PLC")
             live_num = st.text_input("UK Company Number (Optional)", "00445790")
-            if st.button("Run Live Onboarding", use_container_width=True):
-                with st.spinner(f"Running live sweep on {live_name}..."):
+            if st.button(
+                "Onboard & Select for Monitoring",
+                use_container_width=True,
+                type="primary",
+            ):
+                with st.spinner(
+                    f"Fetching Companies House PSCs, OpenSanctions & GDELT for {live_name}..."
+                ):
                     created = api_onboard_live(live_name, live_num)
                     st.session_state["active_entity_id"] = created["entity_id"]
                 st.rerun()
 
         st.divider()
 
-        st.subheader("⚡ Simulate Weekly Scenario")
-        if st.button("1️⃣ Namesake Noise (Florida Fraud)", use_container_width=True):
-            api_inject_scenario(ENTITY_ID, "1_namesake_noise")
-            st.rerun()
-        if st.button("2️⃣ Routine Admin (Address Move)", use_container_width=True):
-            api_inject_scenario(ENTITY_ID, "2_routine_admin")
-            st.rerun()
-        if st.button("3️⃣ Syndicated Echo (Old 2024 Fine)", use_container_width=True):
-            api_inject_scenario(ENTITY_ID, "3_syndicated_echo")
-            st.rerun()
-        if st.button("4️⃣ Ambiguous Media (Port Probe)", use_container_width=True):
-            api_inject_scenario(ENTITY_ID, "4_ambiguous_media")
-            st.rerun()
-        if st.button(
-            "5️⃣ Silent UBO Swap + Sanctions Hit",
-            use_container_width=True,
-            type="primary",
+        # 3. Custom Injection Builder (Pre-filled for the Active Company) & Presets
+        st.subheader("🧪 Inject Event into Active Entity")
+        with st.expander(
+            "➕ Create Custom Injection (Real or Synthetic)", expanded=True
         ):
-            api_inject_scenario(ENTITY_ID, "5_silent_ubo_sanctions")
-            st.rerun()
+            recipe_choice = st.selectbox(
+                "Quick Template Recipe",
+                [
+                    "Custom / Freeform",
+                    "Recipe A: Namesake False Positive (Wrong Jurisdiction)",
+                    "Recipe B: Tier-2 Material Regulatory Inquiry (Notify)",
+                    "Recipe C: Tier-3 Critical Watchlist Match (Auto-Regen)",
+                ],
+            )
+            default_feed = "GDELT_ADVERSE_MEDIA"
+            if "Recipe A" in recipe_choice:
+                default_snippet = (
+                    f"{stream_data['name']} LLC (registered in Delaware, US, 2022) fined $450,000 by US DOT "
+                    f"for interstate warehouse violations in Ohio."
+                )
+            elif "Recipe B" in recipe_choice:
+                default_snippet = (
+                    f"UK regulators open preliminary compliance inquiry into {stream_data['name']} "
+                    f"(Co No. {stream_data['company_number']}) regarding third-party supplier audit controls."
+                )
+            elif "Recipe C" in recipe_choice:
+                default_feed = "OPENSANCTIONS"
+                default_snippet = (
+                    f"WATCHLIST MATCH: Newly appointed beneficial owner of {stream_data['name']} "
+                    f"(Co No. {stream_data['company_number']}) matched to UK HMT Consolidated Sanctions List (Score: 0.98)."
+                )
+            else:
+                default_snippet = f"{stream_data['name']} (Co No. {stream_data['company_number']}) named in customs tariff evasion briefing."
 
-        with st.expander("➕ Inject Custom Delta Event"):
             custom_feed = st.selectbox(
                 "Feed Source",
                 ["GDELT_ADVERSE_MEDIA", "COMPANIES_HOUSE", "OPENSANCTIONS"],
+                index=[
+                    "GDELT_ADVERSE_MEDIA",
+                    "COMPANIES_HOUSE",
+                    "OPENSANCTIONS",
+                ].index(default_feed),
             )
             custom_url = st.text_input(
-                "Source URL", "https://ft.example.com/2026/investigation"
+                "Source URL", "https://ft.example.com/2026/compliance-alert"
             )
             custom_text = st.text_area(
-                "Raw Snippet Content",
-                f"{stream_data['name']} named in customs tariff evasion briefing.",
+                "Raw Snippet Content", default_snippet, height=110
             )
-            if st.button("Inject Custom Event", use_container_width=True):
+            if st.button(
+                "🚀 Inject Custom Event into Jev",
+                use_container_width=True,
+                type="primary",
+            ):
                 api_inject_scenario(
                     ENTITY_ID,
                     custom_record={
@@ -581,10 +669,48 @@ def render_dashboard_page():
                 )
                 st.rerun()
 
+        with st.expander("⚡ 5 Golden Persona Presets (Apex Global)"):
+            if st.button(
+                "1️⃣ Namesake Noise (Florida Fraud)", use_container_width=True
+            ):
+                api_inject_scenario(ENTITY_ID, "1_namesake_noise")
+                st.rerun()
+            if st.button("2️⃣ Routine Admin (Address Move)", use_container_width=True):
+                api_inject_scenario(ENTITY_ID, "2_routine_admin")
+                st.rerun()
+            if st.button(
+                "3️⃣ Syndicated Echo (Old 2024 Fine)", use_container_width=True
+            ):
+                api_inject_scenario(ENTITY_ID, "3_syndicated_echo")
+                st.rerun()
+            if st.button("4️⃣ Ambiguous Media (Port Probe)", use_container_width=True):
+                api_inject_scenario(ENTITY_ID, "4_ambiguous_media")
+                st.rerun()
+            if st.button(
+                "5️⃣ Silent UBO Swap + Sanctions Hit",
+                use_container_width=True,
+                type="primary",
+            ):
+                api_inject_scenario(ENTITY_ID, "5_silent_ubo_sanctions")
+                st.rerun()
+
         st.divider()
 
-        st.subheader("🎚️ Jev System 1 Policy Sliders")
+        # 4. Jev Mode Toggle (Simulated vs Live API) & Policy Sliders
+        st.subheader("🎚️ Jev Engine & Policy Sliders")
         with st.form("policy_form"):
+            current_mode = policy.get("jev_mode", "simulated")
+            new_jev_mode = st.radio(
+                "🧠 Jev Evaluation Mode",
+                options=["simulated", "live"],
+                index=0 if current_mode == "simulated" else 1,
+                format_func=lambda m: (
+                    "Simulated Jev (Offline Calibrated)"
+                    if m == "simulated"
+                    else "Live TypeSafe AI Jev API (TYPESAFE_API_KEY)"
+                ),
+                help="Switch to Live API to send the full state & typed questions to TypeSafe AI Jev.",
+            )
             new_disambig = st.slider(
                 "Entity Match Cutoff (Jev Noul)",
                 0.0,
@@ -617,9 +743,12 @@ def render_dashboard_page():
                 0.05,
                 help="Score above which System 2 LLM automatically regenerates the report.",
             )
-            if st.form_submit_button("Update Jev Thresholds", use_container_width=True):
+            if st.form_submit_button(
+                "Save Engine Mode & Thresholds", use_container_width=True
+            ):
                 api_update_policy(
                     {
+                        "jev_mode": new_jev_mode,
                         "sector": policy["sector"],
                         "risk_appetite": policy["risk_appetite"],
                         "disambiguation_cutoff": new_disambig,
@@ -628,7 +757,7 @@ def render_dashboard_page():
                         "auto_regen_threshold": new_autoregen,
                     }
                 )
-                st.toast("Policy thresholds updated!", icon="✅")
+                st.toast("Engine mode & policy thresholds updated!", icon="✅")
                 st.rerun()
 
         st.divider()
@@ -647,12 +776,18 @@ def render_dashboard_page():
         "CRITICAL": "🔴 CRITICAL RISK",
     }
 
+    active_mode_badge = (
+        "🟢 LIVE TYPESAFE AI JEV API"
+        if policy.get("jev_mode") == "live"
+        else "🧪 SIMULATED JEV ENGINE"
+    )
+
     head_col1, head_col2 = st.columns([3, 1])
     with head_col1:
         st.title(f"🛡️ {stream_data['name']}")
         st.markdown(
             f"**Co. Number:** `{stream_data['company_number']}` | **Jurisdiction:** `{stream_data['jurisdiction']}` | "
-            f"**Active Report Version:** `v{report['version']}`"
+            f"**Active Report Version:** `v{report['version']}` | **Engine:** `{active_mode_badge}`"
         )
     with head_col2:
         st.metric(
@@ -764,20 +899,22 @@ def render_dashboard_page():
                 st.markdown(f"- {item}")
         with tab_cite:
             for cite in report["audit_citations"]:
+                ts = cite.get("timestamp", "")[:10]
+                ts_label = f" ({ts})" if ts else ""
                 st.markdown(
-                    f"**`[{cite['id']}]`** **{cite['source_feed']}** ({cite['timestamp'][:10]})  \n"
+                    f"**`[{cite['id']}]`** **{cite['source_feed']}**{ts_label}  \n"
                     f"{cite['raw_content']} — [Source Link]({cite['url']})"
                 )
 
     with right_pane:
-        st.subheader("🔬 System 1 Gatekeeper Audit Log")
+        st.subheader("🔬 Jev System 1 Gatekeeper Audit Log")
         st.caption(
             "Every weekly delta is scored for Identity, Novelty, and Materiality (~120ms, $0.0004)."
         )
 
         if not audit_events:
             st.info(
-                "Use the sidebar to inject synthetic scenarios or poll live GDELT/Companies House feeds."
+                "Use the sidebar to inject a custom recipe, trigger a preset, or poll live feeds."
             )
         else:
             # Show newest events at the top
@@ -785,6 +922,7 @@ def render_dashboard_page():
                 ev = evt["jev_evaluation"]
                 rec = evt["record"]
                 action = ev["action_taken"]
+                engine_tag = ev.get("engine_used", "JEV_SIMULATED")
 
                 ACTION_ICON = {
                     "DISCARDED_FALSE_POSITIVE": "🛑",
@@ -795,12 +933,12 @@ def render_dashboard_page():
                 }.get(action, "ℹ️")
 
                 with st.expander(
-                    f"{ACTION_ICON} {action} | Score: {ev['worth_a_report_score']:.2f} ({rec['source_feed']})",
+                    f"{ACTION_ICON} [{engine_tag}] {action} | Score: {ev['worth_a_report_score']:.2f} ({rec['source_feed']})",
                     expanded=True,
                 ):
                     st.markdown(f"**Snippet:** {rec['raw_content']}")
                     st.caption(
-                        f"Scenario: `{evt['scenario_name']}` | Source URL: {rec['url']}"
+                        f"Scenario: `{evt.get('scenario_name', 'custom')}` | Source URL: {rec['url']}"
                     )
 
                     m1, m2, m3 = st.columns(3)
@@ -816,7 +954,12 @@ def render_dashboard_page():
 # MULTI-PAGE NAVIGATION ROUTER
 # =====================================================================
 
-page_home = st.Page(render_home_page, title="Overview & Guide", icon="🏠", default=True)
+page_home = st.Page(
+    render_home_page,
+    title="Overview & Custom Injection Guide",
+    icon="🏠",
+    default=True,
+)
 page_dashboard = st.Page(
     render_dashboard_page, title="Live Sandbox Dashboard", icon="🎛️"
 )

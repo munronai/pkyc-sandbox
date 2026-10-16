@@ -1,3 +1,4 @@
+import asyncio
 import os
 import uuid
 from datetime import datetime, timezone
@@ -39,6 +40,10 @@ except Exception:
 
 
 class PolicyThresholds(BaseModel):
+    jev_mode: Literal["simulated", "live"] = Field(
+        "simulated",
+        description="Toggle between offline calibrated simulation and live TypeSafe AI Jev API",
+    )
     sector: str = "Fintech / Banking"
     risk_appetite: Literal["Conservative", "Balanced", "Aggressive"] = "Conservative"
     disambiguation_cutoff: float = Field(
@@ -56,6 +61,7 @@ class PolicyThresholds(BaseModel):
 
 
 class JevEvaluation(BaseModel):
+    engine_used: Literal["JEV_SIMULATED", "JEV_LIVE_API"] = "JEV_SIMULATED"
     is_same_entity_prob: float
     is_net_new_event_prob: float
     risk_category: str
@@ -141,54 +147,9 @@ class SandboxStore:
         self.policy = PolicyThresholds()
         self.entities: Dict[str, MonitoredEntity] = {}
         # Synchronous seed for initial boot
-        self.seed_golden_persona(persist=False)
+        self._build_golden_persona()
 
-    async def load_or_seed(self):
-        """Asynchronous state loader using Modal's .aio interface."""
-        if MODAL_STATE is not None:
-            try:
-                has_entities = await MODAL_STATE.contains.aio("entities")
-                has_policy = await MODAL_STATE.contains.aio("policy")
-                if has_entities and has_policy:
-                    policy_data = await MODAL_STATE.get.aio("policy")
-                    entities_data = await MODAL_STATE.get.aio("entities")
-                    self.policy = PolicyThresholds(**policy_data)
-                    self.entities = {
-                        k: MonitoredEntity(**v) for k, v in entities_data.items()
-                    }
-                    return
-            except Exception:
-                pass
-        await self.seed_golden_persona(persist=False)
-
-    async def clear_and_seed(self):
-        """Forces an absolute wipe of remote state and reseeds baseline."""
-        self.policy = PolicyThresholds()
-        await self.seed_golden_persona()
-        if MODAL_STATE is not None:
-            try:
-                # Clear all entries from the persistent modal.Dict
-                await MODAL_STATE.clear.aio()
-                # Re-populate clean baseline
-                await MODAL_STATE.put.aio("policy", self.policy.model_dump())
-                await MODAL_STATE.put.aio(
-                    "entities", {k: v.model_dump() for k, v in self.entities.items()}
-                )
-            except Exception as e:
-                print(f"[Clear & Seed Error]: {e}")
-
-    async def save(self):
-        """Asynchronous state saver using Modal's .aio interface."""
-        if MODAL_STATE is not None:
-            try:
-                await MODAL_STATE.put.aio("policy", self.policy.model_dump())
-                await MODAL_STATE.put.aio(
-                    "entities", {k: v.model_dump() for k, v in self.entities.items()}
-                )
-            except Exception:
-                pass
-
-    async def seed_golden_persona(self, persist: bool = False):
+    def _build_golden_persona(self):
         baseline_records = [
             FeedRecord(
                 id="rec_base1",
@@ -244,7 +205,56 @@ class SandboxStore:
                 reports=[baseline_report],
             )
         }
-        await self.save()
+
+    async def load_or_seed(self):
+        """Asynchronous state loader using Modal's .aio interface."""
+        if MODAL_STATE is not None:
+            try:
+                has_entities = await MODAL_STATE.contains.aio("entities")
+                has_policy = await MODAL_STATE.contains.aio("policy")
+                if has_entities and has_policy:
+                    policy_data = await MODAL_STATE.get.aio("policy")
+                    entities_data = await MODAL_STATE.get.aio("entities")
+                    self.policy = PolicyThresholds(**policy_data)
+                    self.entities = {
+                        k: MonitoredEntity(**v) for k, v in entities_data.items()
+                    }
+                    return
+            except Exception:
+                pass
+        await self.seed_golden_persona(persist=True)
+
+    async def clear_and_seed(self):
+        """Forces an absolute wipe of remote state and reseeds baseline."""
+        self.policy = PolicyThresholds()
+        self._build_golden_persona()
+        if MODAL_STATE is not None:
+            try:
+                # Clear all entries from the persistent modal.Dict
+                await MODAL_STATE.clear.aio()
+                # Re-populate clean baseline
+                await MODAL_STATE.put.aio("policy", self.policy.model_dump())
+                await MODAL_STATE.put.aio(
+                    "entities", {k: v.model_dump() for k, v in self.entities.items()}
+                )
+            except Exception as e:
+                print(f"[Clear & Seed Error]: {e}")
+
+    async def save(self):
+        """Asynchronous state saver using Modal's .aio interface."""
+        if MODAL_STATE is not None:
+            try:
+                await MODAL_STATE.put.aio("policy", self.policy.model_dump())
+                await MODAL_STATE.put.aio(
+                    "entities", {k: v.model_dump() for k, v in self.entities.items()}
+                )
+            except Exception:
+                pass
+
+    async def seed_golden_persona(self, persist: bool = False):
+        self._build_golden_persona()
+        if persist:
+            await self.save()
 
 
 STORE = SandboxStore()
@@ -302,7 +312,7 @@ async def evaluate_delta_with_jev(
 ) -> JevEvaluation:
     """
     Constructs the exact TypeSafe AI Jev payload (`noul`, `choice`, `score`).
-    Calls live Jev API if TYPESAFE_API_KEY is set; otherwise runs deterministic calibrated simulation.
+    Routes to live TypeSafe AI Jev API when policy.jev_mode == "live"; otherwise runs deterministic calibrated simulation.
     """
     latest_report = entity.reports[-1]
     jev_payload = {
@@ -349,20 +359,50 @@ async def evaluate_delta_with_jev(
     }
 
     api_key = os.getenv("TYPESAFE_API_KEY")
-    if api_key:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+    engine_used: Literal["JEV_SIMULATED", "JEV_LIVE_API"] = "JEV_SIMULATED"
+
+    # Route to Live TypeSafe AI Jev API when policy.jev_mode == "live"
+    if policy.jev_mode == "live":
+        if not api_key:
+            raise HTTPException(
+                status_code=400,
+                detail="Jev Mode is set to 'live', but TYPESAFE_API_KEY environment variable is not set.",
+            )
+        async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(
-                "https://api.typesafe.ai/v1/evaluate",
+                os.getenv("TYPESAFE_API_URL", "https://api.typesafe.ai/v1/evaluate"),
                 headers={"Authorization": f"Bearer {api_key}"},
                 json=jev_payload,
             )
             resp.raise_for_status()
             data = resp.json()
-            same_prob = data["is_same_entity"]["probability"]
-            new_prob = data["is_net_new_event"]["probability"]
-            category = data["risk_category"]["top_choice"]
-            urgency_level = data["regeneration_urgency"]["top_level"]
-            worth_score = data["regeneration_urgency"]["calibrated_score"]
+
+            # Support both direct question keys and nested 'answers'/'results' objects
+            answers = data.get("answers", data.get("results", data))
+            same_prob = float(
+                answers["is_same_entity"].get(
+                    "probability", answers["is_same_entity"].get("true_prob", 0.5)
+                )
+            )
+            new_prob = float(
+                answers["is_net_new_event"].get(
+                    "probability", answers["is_net_new_event"].get("true_prob", 0.5)
+                )
+            )
+            category = answers["risk_category"].get(
+                "top_choice",
+                answers["risk_category"].get("choice", "ESG_Reputational"),
+            )
+            urgency_level = answers["regeneration_urgency"].get(
+                "top_level", URGENCY_LEVELS[2]
+            )
+            worth_score = float(
+                answers["regeneration_urgency"].get(
+                    "calibrated_score",
+                    answers["regeneration_urgency"].get("expected_score", 0.5),
+                )
+            )
+            engine_used = "JEV_LIVE_API"
     else:
         # Calibrated System 1 Simulation for Offline Demo
         same_prob, new_prob, category, urgency_level, worth_score = (
@@ -372,21 +412,22 @@ async def evaluate_delta_with_jev(
     # Apply Policy Threshold Gatekeeping
     if same_prob < policy.disambiguation_cutoff:
         action = "DISCARDED_FALSE_POSITIVE"
-        note = f"Filtered by Jev Noul disambiguation ({same_prob:.2f} < {policy.disambiguation_cutoff} cutoff)."
+        note = f"[{engine_used}] Filtered by Jev Noul disambiguation ({same_prob:.2f} < {policy.disambiguation_cutoff} cutoff)."
     elif new_prob < policy.novelty_cutoff:
         action = "DISCARDED_DUPLICATE_ECHO"
-        note = f"Filtered by Jev Noul novelty check ({new_prob:.2f} < {policy.novelty_cutoff} cutoff). Event already in baseline."
+        note = f"[{engine_used}] Filtered by Jev Noul novelty check ({new_prob:.2f} < {policy.novelty_cutoff} cutoff). Event already in baseline."
     elif worth_score >= policy.auto_regen_threshold:
         action = "AUTO_TRIGGERED_REPORT_REFRESH"
-        note = f"Critical materiality ({worth_score:.2f} >= {policy.auto_regen_threshold}). Auto-triggering System 2 LLM synthesis."
+        note = f"[{engine_used}] Critical materiality ({worth_score:.2f} >= {policy.auto_regen_threshold}). Auto-triggering System 2 LLM synthesis."
     elif worth_score >= policy.notify_threshold:
         action = "QUEUED_FOR_USER_APPROVAL"
-        note = f"Material update detected ({worth_score:.2f} >= {policy.notify_threshold}). Customer notified to approve report refresh."
+        note = f"[{engine_used}] Material update detected ({worth_score:.2f} >= {policy.notify_threshold}). Queued for customer approval."
     else:
         action = "LOGGED_SILENT_ADMIN_DELTA"
-        note = f"Low materiality score ({worth_score:.2f}). Appended to state log without LLM cost."
+        note = f"[{engine_used}] Low materiality score ({worth_score:.2f}). Appended to audit log without LLM cost."
 
     return JevEvaluation(
+        engine_used=engine_used,
         is_same_entity_prob=same_prob,
         is_net_new_event_prob=new_prob,
         risk_category=category,
@@ -399,13 +440,19 @@ async def evaluate_delta_with_jev(
 
 def _simulate_jev_distributions(record: FeedRecord, scenario_hint: Optional[str]):
     text = record.raw_content.lower()
-    if scenario_hint == "1_namesake_noise" or "born 1991" in text:
+    if (
+        scenario_hint == "1_namesake_noise"
+        or "born 1991" in text
+        or "delaware" in text
+        or "nevada" in text
+    ):
         return 0.08, 0.99, "Benign_Unrelated", URGENCY_LEVELS[0], 0.04
     if scenario_hint == "2_routine_admin" or "form ad01" in text or "filing [" in text:
         return 0.99, 0.95, "Routine_Admin", URGENCY_LEVELS[1], 0.28
     if (
         scenario_hint == "3_syndicated_echo"
         or "looking back at 2024" in text
+        or "looking back at how" in text
         or "0 direct hits" in text
     ):
         return 0.98, 0.06, "Routine_Admin", URGENCY_LEVELS[0], 0.11
@@ -647,8 +694,6 @@ async def approve_report_refresh(entity_id: str = "ent_apex_01") -> dict:
 # 8. FASTAPI REST ENDPOINTS
 # =====================================================================
 
-app = FastAPI(title="Xapien + Jev pKYC Simulation Sandbox", version="2.0.0")
-
 
 @app.get("/api/v1/entities")
 async def list_entities():
@@ -703,6 +748,7 @@ async def inject_sandbox_delta(req: InjectDeltaRequest):
 )
 async def approve_pending_refresh(entity_id: str = "ent_apex_01"):
     """Approves pending Tier-2 alerts and runs the System 2 LLM to produce a new report version."""
+    await STORE.load_or_seed()
     entity = STORE.entities.get(entity_id)
     if not entity:
         raise HTTPException(status_code=404, detail="Entity not found")
@@ -717,14 +763,16 @@ async def approve_pending_refresh(entity_id: str = "ent_apex_01"):
 
 @app.put("/api/v1/sandbox/policy-thresholds", response_model=PolicyThresholds)
 async def update_policy_thresholds(new_policy: PolicyThresholds):
-    """Tune Jev Noul disambiguation and Score materiality thresholds on the fly."""
+    """Tune Jev Engine Mode, Noul disambiguation, and Score materiality thresholds on the fly."""
+    await STORE.load_or_seed()
     STORE.policy = new_policy
+    await STORE.save()
     return STORE.policy
 
 
 @app.post("/api/v1/sandbox/reset")
 async def reset_sandbox():
-    """Resets the sandbox back to the clean v1 baseline report."""
+    """Resets the sandbox back to the clean v1 baseline report and clears Modal Dict state."""
     await STORE.clear_and_seed()
     return {"status": "Sandbox reset to v1 baseline."}
 
@@ -732,8 +780,6 @@ async def reset_sandbox():
 @app.post("/api/v1/entities/{entity_id}/poll-live-feeds")
 async def poll_live_entity_feeds(entity_id: str = "ent_apex_01", timespan: str = "1w"):
     """Polls live UK Companies House, OpenSanctions, and GDELT feeds and filters through Jev."""
-    from live_feeds import poll_all_live_feeds
-
     await STORE.load_or_seed()
     entity = STORE.entities.get(entity_id)
     if not entity:
@@ -760,17 +806,20 @@ async def poll_live_entity_feeds(entity_id: str = "ent_apex_01", timespan: str =
 
 @app.post("/api/v1/entities/onboard-live")
 async def onboard_live_entity(req: OnboardLiveRequest):
-    """Onboards a real-world company using live Companies House, OpenSanctions, and GDELT feeds."""
-    from live_feeds import poll_all_live_feeds
-
+    """Onboards a real-world company using live feeds and extracts real PSCs/UBOs for Jev disambiguation."""
     await STORE.load_or_seed()
     new_id = f"ent_{uuid.uuid4().hex[:6]}"
-    live_records = await poll_all_live_feeds(
-        entity_name=req.company_name,
-        company_number=req.company_number,
-        jurisdiction=req.jurisdiction.lower(),
-        timespan="3m",
-    )
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        (ch_records, discovered_ubos), gdelt_records = await asyncio.gather(
+            fetch_companies_house(client, req.company_name, req.company_number),
+            fetch_gdelt_adverse_media(client, req.company_name, timespan="3m"),
+        )
+        os_records = await fetch_opensanctions(
+            client, req.company_name, discovered_ubos, req.jurisdiction.lower()
+        )
+        live_records = ch_records + os_records + gdelt_records
+
     if not live_records:
         live_records = [
             FeedRecord(
@@ -794,7 +843,10 @@ async def onboard_live_entity(req: OnboardLiveRequest):
         version=1,
         overall_risk_level="LOW",
         jev_calibrated_risk_score=0.22,
-        executive_summary=f"Live baseline due diligence report generated for {req.company_name} across {len(live_records)} open-source records.",
+        executive_summary=(
+            f"Live baseline due diligence report generated for {req.company_name} ({req.company_number or 'UK'}) "
+            f"across {len(live_records)} open-source records. Active PSCs/Officers: {', '.join(discovered_ubos) or 'None listed in PSC feed'}."
+        ),
         corporate_structure_findings=corp,
         sanctions_and_peps_findings=sanc,
         adverse_media_findings=media,
@@ -806,41 +858,12 @@ async def onboard_live_entity(req: OnboardLiveRequest):
         name=req.company_name,
         company_number=req.company_number or "N/A",
         jurisdiction=req.jurisdiction,
-        known_officers=[],
+        known_officers=discovered_ubos,
         reports=[base_rep],
     )
     STORE.entities[new_id] = entity
     await STORE.save()
     return {"entity_id": new_id, "entity": entity}
-
-
-@app.post(
-    "/api/v1/entities/{entity_id}/approve-refresh", response_model=DueDiligenceReport
-)
-async def approve_pending_refresh(entity_id: str = "ent_apex_01"):
-    await STORE.load_or_seed()
-    entity = STORE.entities.get(entity_id)
-    if not entity or not entity.pending_refresh_events:
-        raise HTTPException(
-            status_code=400, detail="No pending material events in queue."
-        )
-    events_to_fold = list(entity.pending_refresh_events)
-    entity.pending_refresh_events.clear()
-    return await synthesize_updated_report(entity, events_to_fold)
-
-
-@app.put("/api/v1/sandbox/policy-thresholds", response_model=PolicyThresholds)
-async def update_policy_thresholds(new_policy: PolicyThresholds):
-    await STORE.load_or_seed()
-    STORE.policy = new_policy
-    await STORE.save()
-    return STORE.policy
-
-
-@app.post("/api/v1/sandbox/reset")
-async def reset_sandbox():
-    await STORE.seed_golden_persona()
-    return {"status": "Sandbox reset to v1 baseline."}
 
 
 # Mount the FastMCP SSE app at /mcp so MCP clients can connect over HTTP alongside REST
