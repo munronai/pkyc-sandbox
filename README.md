@@ -129,8 +129,8 @@ The FastMCP server exposes the following interface to AI assistants and agents:
 ### 1. Clone & Install Dependencies
 
 ```bash
-git clone https://github.com/your-username/xapien-sandbox.git
-cd xapien-sandbox
+git clone https://github.com/your-username/pkyc-sandbox.git
+cd pkyc-sandbox
 
 # Using uv (fastest)
 uv sync
@@ -191,7 +191,7 @@ Add the server at the **root level**:
 ```json
 {
   "mcpServers": {
-    "xapien-pkyc-sandbox": {
+    "pkyc-sandbox": {
       "command": "npx",
       "args": [
         "-y",
@@ -220,7 +220,7 @@ Edit `~/.cursor/mcp.json` (or go to **Cursor Settings** → **Features** → **M
 ```json
 {
   "mcpServers": {
-    "xapien-pkyc-sandbox": {
+    "pkyc-sandbox": {
       "url": "https://mrmunro--munron-pkyc-sandbox-api.us-east.modal.run/mcp/sse"
     }
   }
