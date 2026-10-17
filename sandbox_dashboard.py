@@ -1,8 +1,12 @@
+import asyncio
+import json
 import os
 import streamlit as st
 import httpx
 import pandas as pd
 import streamlit.components.v1 as components
+from mcp import ClientSession
+from mcp.client.sse import sse_client
 
 # Automatically uses Modal's live HTTPS domain when deployed, or 127.0.0.1:8000 when running locally
 API_BASE = os.getenv("SANDBOX_API_BASE", "http://127.0.0.1:8000/api/v1").rstrip("/")
@@ -230,6 +234,45 @@ def render_home_page():
                 page_research,
                 label="Read Research & Product Decisions →",
                 icon="📐",
+                use_container_width=True,
+            )
+
+    st.markdown("### 🤖 External MCP Integrations")
+    g_col1, g_col2, g_col3 = st.columns(3)
+    with g_col1:
+        with st.container(border=True):
+            st.markdown("#### 🔌 Claude Desktop & Cursor (Option 1)")
+            st.write(
+                "Configure external AI agents to inspect dossiers and approve report refreshes over `/mcp/sse`."
+            )
+            st.page_link(
+                page_guide_claude,
+                label="Open Claude & Cursor Setup Guide →",
+                icon="🔌",
+                use_container_width=True,
+            )
+    with g_col2:
+        with st.container(border=True):
+            st.markdown("#### 🤖 MCP Agent Console (Option 2)")
+            st.write(
+                "Interactive embedded MCP client to test SSE handshakes, tool calls, and resource reads directly in Streamlit."
+            )
+            st.page_link(
+                page_mcp,
+                label="Open MCP Agent Console →",
+                icon="🤖",
+                use_container_width=True,
+            )
+    with g_col3:
+        with st.container(border=True):
+            st.markdown("#### 🔬 Official MCP Inspector (Option 3)")
+            st.write(
+                "Run the official zero-install `npx` visualizer to debug tool schemas and SSE streams locally or on Modal."
+            )
+            st.page_link(
+                page_guide_inspector,
+                label="Open MCP Inspector Guide →",
+                icon="🔬",
                 use_container_width=True,
             )
 
@@ -1036,6 +1079,477 @@ def render_dashboard_page():
 
 
 # =====================================================================
+# MCP HELP GUIDES (OPTIONS 1 & 3)
+# =====================================================================
+
+
+def render_claude_cursor_guide():
+    """Guide for Option 1: Connecting Claude Desktop or Cursor IDE to the live MCP endpoint."""
+    st.title("🔌 Connect to Claude Desktop & Cursor (Option 1)")
+    st.caption(
+        "Turn external AI assistants into autonomous compliance investigators using your live MCP server."
+    )
+
+    st.info(
+        f"**Active MCP SSE Endpoint:** `{MCP_URL}`  \n"
+        "Mounted at `/mcp` via `app.mount('/mcp', mcp.sse_app(transport_security=MCP_TRANSPORT_SECURITY))` — "
+        "exposing `GET /mcp/sse` (SSE stream) and `POST /mcp/messages/` (JSON-RPC messages). "
+        "DNS rebinding protection (`TransportSecuritySettings`) explicitly whitelists both the live Modal host "
+        "(`mrmunro--munron-pkyc-sandbox-api.us-east.modal.run`) and local loopback (`127.0.0.1` / `localhost`) "
+        "so remote and local clients connect without triggering `HTTP 421 Misdirected Request` errors."
+    )
+
+    tab_claude, tab_cursor, tab_prompts = st.tabs(
+        [
+            "💬 Claude Desktop Setup",
+            "💻 Cursor IDE Setup",
+            "🧪 3-Step Demo Prompts",
+        ]
+    )
+
+    with tab_claude:
+        st.markdown("### Method 1: Claude Desktop 'Connectors' Dialog (Easiest — In-App GUI)")
+        st.markdown(
+            "Recent versions of Claude Desktop provide a built-in GUI to add remote MCP servers without manually editing JSON files:"
+        )
+        st.markdown(
+            f"""
+            1. Open Claude Desktop and go to **Settings** → **Connectors** (or **Integrations**).
+            2. Click **Add Connector** / **Add Custom Server**.
+            3. Paste your active MCP URL:
+            """
+        )
+        st.code(MCP_URL, language="bash")
+        st.info(
+            "ℹ️ **About the SSE Deprecation Warning in the Connectors Dialog:**  \n"
+            "Claude Desktop will show: *'This connector will use SSE transport, which is being deprecated. "
+            "If you maintain this server, consider switching to streamable HTTP.'*  \n"
+            "This is Anthropic's specification roadmap advisory (MCP 2024 spec uses SSE, while MCP 2025 roadmap "
+            "is introducing Streamable HTTP). SSE transport is fully operational, production-ready, and supported."
+        )
+
+        st.divider()
+
+        st.markdown("### Method 2: Configure via `claude_desktop_config.json`")
+        st.markdown(
+            "Alternatively, you can configure Claude Desktop using the config file directly:"
+        )
+        st.code(
+            "# macOS:\n~/Library/Application Support/Claude/claude_desktop_config.json\n\n"
+            "# Windows:\n%APPDATA%\\Claude\\claude_desktop_config.json",
+            language="bash",
+        )
+
+        st.warning(
+            "⚠️ **Important JSON Schema Requirement:**  \n"
+            "`\"mcpServers\"` MUST be declared at the **root level** of `claude_desktop_config.json`. "
+            "If it is nested inside a `\"preferences\"` dictionary or inside general app preferences files, "
+            "Claude Desktop will silently ignore the MCP tools!"
+        )
+
+        claude_subtab_native, claude_subtab_bridge = st.tabs(
+            ["⚡ Native Remote SSE (Recommended)", "🌉 `mcp-remote` Stdio Bridge"]
+        )
+
+        with claude_subtab_native:
+            st.caption("Native direct SSE connection without external Node.js dependencies:")
+            claude_native_config = f"""{{
+  "mcpServers": {{
+    "xapien-pkyc-sandbox": {{
+      "type": "sse",
+      "url": "{MCP_URL}"
+    }}
+  }}
+}}"""
+            st.code(claude_native_config, language="json")
+
+        with claude_subtab_bridge:
+            st.caption(
+                "When using `mcp-remote`, pass `--transport sse-only` so the bridge does not attempt "
+                "HTTP POST probes that cause `HTTP 405 Method Not Allowed` errors:"
+            )
+            claude_bridge_config = f"""{{
+  "mcpServers": {{
+    "xapien-pkyc-sandbox": {{
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "{MCP_URL}", "--transport", "sse-only"]
+    }}
+  }}
+}}"""
+            st.code(claude_bridge_config, language="json")
+
+        st.markdown("### Step 3: Restart Claude Desktop")
+        st.markdown(
+            "Quit and reopen Claude Desktop. Look at the bottom-right of the input box: "
+            "the **🔨 hammer icon** will appear showing your 3 registered tools (`simulate_monitoring_event`, `poll_live_open_data`, and `approve_report_refresh`)."
+        )
+
+    with tab_cursor:
+        st.markdown("### Step 1: Configure Cursor MCP Settings")
+        st.markdown(
+            "In Cursor, navigate to **Cursor Settings** → **Features** → **MCP** → **Add New MCP Server**, "
+            "or edit your global MCP settings file:"
+        )
+        st.code("~/.cursor/mcp.json", language="bash")
+
+        cursor_config_json = f"""{{
+  "mcpServers": {{
+    "xapien-pkyc-sandbox": {{
+      "url": "{MCP_URL}"
+    }}
+  }}
+}}"""
+        st.code(cursor_config_json, language="json")
+        st.markdown(
+            "Cursor supports remote and local SSE URLs natively. Click the refresh button in Cursor's MCP panel "
+            "to see the status change to green (Active)."
+        )
+
+    with tab_prompts:
+        st.markdown("### 🎬 The 3-Step Demo Script (Works in Any MCP Client / Agent Console)")
+        st.markdown(
+            "Run the following prompts in any MCP-enabled AI assistant (Claude Desktop, Cursor, Windsurf, etc.) "
+            "or execute the equivalent calls directly in **Option 2 (MCP Agent Console)** to showcase the autonomous workflow:"
+        )
+
+        with st.container(border=True):
+            st.markdown("#### Step 1: Inspect Entity State via Resource")
+            p1 = "Can you inspect the latest due diligence report for Apex Global Logistics (dd://entities/ent_apex_01/latest-report) and summarize its current risk level and officers?"
+            st.code(p1, language="markdown")
+            st.markdown(
+                "**What the Agent does:** Reads the structured JSON resource (`dd://entities/ent_apex_01/latest-report`) "
+                "directly from the MCP server without hallucinating."
+            )
+
+        with st.container(border=True):
+            st.markdown("#### Step 2: Trigger an Injected Risk Event via Tool")
+            st.markdown("**Option A — Critical UBO Sanctions Hit (Auto-Triggers System 2 Report):**")
+            p2a = "Simulate what happens if a new PSC named Dmitri Kovalev is added and matched to sanctions using your simulation tool."
+            st.code(p2a, language="markdown")
+            st.markdown(
+                "**What the Agent does:** Calls `simulate_monitoring_event(scenario_preset=\"5_silent_ubo_sanctions\", entity_id=\"ent_apex_01\")`, "
+                "inspects Jev’s `0.97` score and the `AUTO_TRIGGER_SYSTEM2_REPORT` action, and explains why the System 1 gatekeeper escalated it automatically."
+            )
+            st.markdown("**Option B — Ambiguous Adverse Media (Routes to Triage Queue for Step 3):**")
+            p2b = "Use your simulate_monitoring_event tool with scenario_preset='4_ambiguous_media' on ent_apex_01. What did Jev score the materiality and what action was taken?"
+            st.code(p2b, language="markdown")
+            st.markdown(
+                "**What the Agent does:** Calls `simulate_monitoring_event(scenario_preset=\"4_ambiguous_media\", entity_id=\"ent_apex_01\")`, "
+                "inspects Jev’s `0.68` score and the `QUEUE_FOR_ANALYST_REVIEW` action, and notes that it awaits approval in the triage queue."
+            )
+
+        with st.container(border=True):
+            st.markdown("#### Step 3: Autonomous Triage & Approval")
+            p3 = "Check our monitoring triage queue (dd://monitoring/triage-queue). If there are any pending material alerts above 0.50 confidence, approve the report refresh and give me an updated risk summary."
+            st.code(p3, language="markdown")
+            st.markdown(
+                "**What the Agent does:** Inspects the queue (`dd://monitoring/triage-queue`), notes the materiality score, "
+                "invokes `approve_report_refresh(entity_id=\"ent_apex_01\")`, and reports back the newly synthesized v2 or v3 dossier."
+            )
+
+
+def render_mcp_inspector_guide():
+    """Guide for Option 3: Testing with the Official MCP Inspector UI."""
+    st.title("🔬 Official MCP Inspector Guide (Option 3)")
+    st.caption(
+        "Zero-code developer visualizer to debug SSE connection health, test tool schemas, and read resources."
+    )
+
+    st.markdown(
+        """
+        The **[MCP Inspector](https://github.com/modelcontextprotocol/inspector)** is the reference developer tool 
+        maintained by the Model Context Protocol project. It lets anyone inspect JSON-RPC payloads, validate tool schemas, 
+        and test live endpoints in a web browser without setting up Claude Desktop.
+        """
+    )
+
+    st.info(
+        f"**Active MCP SSE Endpoint:** `{MCP_URL}`  \n"
+        "Works identically against your local server (`http://127.0.0.1:8000/mcp/sse`) and your deployed Modal endpoint "
+        "(`https://mrmunro--munron-pkyc-sandbox-api.us-east.modal.run/mcp/sse`)."
+    )
+
+    st.markdown("### Step 1: Run the Inspector Terminal Command")
+    st.markdown(
+        "Run this command in your terminal (requires Node.js / `npx` installed):"
+    )
+
+    inspector_cmd = f"npx @modelcontextprotocol/inspector {MCP_URL}"
+    st.code(inspector_cmd, language="bash")
+    st.caption(
+        f"Tip: In the Inspector sidebar, ensure **Transport Type** is set to **SSE** and **URL** is set to `{MCP_URL}`, then click **Connect**."
+    )
+
+    st.markdown("### Step 2: Open the Inspector Web UI")
+    st.markdown(
+        "The terminal will output a local URL (typically `http://localhost:6274` or `http://localhost:5173`). "
+        "Open it in your browser and you will see three diagnostic panels:"
+    )
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        with st.container(border=True):
+            st.markdown("#### 📡 1. Connection Ping")
+            st.write(
+                "Verifies active SSE streaming from `/mcp/sse` and displays protocol version handshakes."
+            )
+    with c2:
+        with st.container(border=True):
+            st.markdown("#### 🛠️ 2. Tool Form Testers")
+            st.write(
+                "Provides interactive form inputs pre-populated with your exact Pydantic parameter schemas."
+            )
+    with c3:
+        with st.container(border=True):
+            st.markdown("#### 📑 3. Live Resource Reader")
+            st.write(
+                "Reads `dd://monitoring/triage-queue` and templated `dd://entities/{entity_id}/latest-report` JSON resources."
+            )
+
+    st.markdown("### Step 3: What to Test During a Demo")
+    st.markdown(
+        """
+        1. Select **Tools** → `simulate_monitoring_event`.
+        2. Set `scenario_preset` to `5_silent_ubo_sanctions` and click **Run Tool**.
+        3. Switch to **Resources** / **Resource Templates** → enter `dd://entities/ent_apex_01/latest-report` and click **Read Resource**.
+        4. Point out that the report immediately auto-regenerated to **v2 (CRITICAL RISK)** because Jev scored the sanctions hit above `0.88`.
+        """
+    )
+
+
+# =====================================================================
+# EMBEDDED MCP AGENT CLIENT & INSPECTOR (OPTION 2)
+# =====================================================================
+
+
+def _format_mcp_result(result) -> dict:
+    """Convert MCP SDK Pydantic result objects into a JSON-serializable dict for st.json."""
+    if isinstance(result, dict):
+        payload = result
+    elif hasattr(result, "model_dump"):
+        payload = result.model_dump(mode="json")
+    else:
+        return {"result": str(result)}
+
+    for key in ("contents", "content"):
+        items = payload.get(key)
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict) and isinstance(item.get("text"), str):
+                    try:
+                        item["parsed_json"] = json.loads(item["text"])
+                    except Exception:
+                        pass
+    return payload
+
+
+MCP_DEMO_STEPS = {
+    "Step 1 — Inspect Entity State: Read dd://entities/ent_apex_01/latest-report": {
+        "prompt": (
+            "Can you inspect the latest due diligence report for Apex Global Logistics "
+            "(dd://entities/ent_apex_01/latest-report) and summarize its current risk level and officers?"
+        ),
+        "what_it_does": (
+            "Reads the structured JSON resource (`dd://entities/ent_apex_01/latest-report`) "
+            "directly from the MCP server without hallucinating."
+        ),
+        "rpc_summary": "resources/read → dd://entities/ent_apex_01/latest-report",
+    },
+    "Step 2a — Inject Sanctions Hit (Dmitri Kovalev): simulate_monitoring_event (5_silent_ubo_sanctions)": {
+        "prompt": (
+            "Simulate what happens if a new PSC named Dmitri Kovalev is added and matched to sanctions "
+            "using your simulation tool."
+        ),
+        "what_it_does": (
+            "Calls `simulate_monitoring_event(scenario_preset='5_silent_ubo_sanctions', entity_id='ent_apex_01')`, "
+            "inspects Jev’s `0.97` score and the `AUTO_TRIGGER_SYSTEM2_REPORT` action, and explains why the "
+            "System 1 gatekeeper escalated it automatically to regenerate the dossier."
+        ),
+        "rpc_summary": "tools/call → simulate_monitoring_event(scenario_preset='5_silent_ubo_sanctions', entity_id='ent_apex_01')",
+    },
+    "Step 2b — Inject Ambiguous Media (Queues for Triage): simulate_monitoring_event (4_ambiguous_media)": {
+        "prompt": (
+            "Use your simulate_monitoring_event tool with scenario_preset='4_ambiguous_media' on ent_apex_01. "
+            "What did Jev score the materiality and what action was taken?"
+        ),
+        "what_it_does": (
+            "Calls `simulate_monitoring_event(scenario_preset='4_ambiguous_media', entity_id='ent_apex_01')`, "
+            "inspects Jev’s `0.68` score and the `QUEUE_FOR_ANALYST_REVIEW` action, placing the alert in the "
+            "triage queue for Step 3."
+        ),
+        "rpc_summary": "tools/call → simulate_monitoring_event(scenario_preset='4_ambiguous_media', entity_id='ent_apex_01')",
+    },
+    "Step 3a — Check Triage Queue: Read dd://monitoring/triage-queue": {
+        "prompt": (
+            "Check our monitoring triage queue (dd://monitoring/triage-queue). If there are any pending "
+            "material alerts above 0.50 confidence, approve the report refresh and give me an updated risk summary."
+        ),
+        "what_it_does": (
+            "Reads `dd://monitoring/triage-queue` to inspect pending medium-confidence alerts (`0.50 <= score < 0.88`) "
+            "and their materiality scores before invoking report refresh."
+        ),
+        "rpc_summary": "resources/read → dd://monitoring/triage-queue",
+    },
+    "Step 3b — Approve Report Refresh: Call approve_report_refresh (ent_apex_01)": {
+        "prompt": (
+            "Approve the pending report refresh for ent_apex_01 and summarize the newly synthesized dossier."
+        ),
+        "what_it_does": (
+            "Invokes `approve_report_refresh(entity_id='ent_apex_01')`, promoting queued triage events into "
+            "the System 2 synthesizer and returning the upgraded v2 or v3 dossier."
+        ),
+        "rpc_summary": "tools/call → approve_report_refresh(entity_id='ent_apex_01')",
+    },
+}
+
+
+def render_mcp_demo_page():
+    """Option 2: Embedded interactive MCP client console inside Streamlit."""
+    st.title("🤖 MCP Agent Interactive Console (Option 2)")
+    st.caption(
+        "Demonstrating real-time Tool Calling & Resource Subscriptions over Model Context Protocol (SSE)."
+    )
+
+    st.markdown(
+        f"""
+        This console connects directly as a live Python MCP client (`mcp.client.sse.sse_client`) to the FastMCP SSE endpoint:
+        `{MCP_URL}`
+        """
+    )
+
+    with st.expander("🎬 View the 3-Step Autonomous Agent Demo Script", expanded=False):
+        st.markdown(
+            "You can run this 3-step workflow in any external MCP assistant (Claude Desktop, Cursor, etc.) "
+            "**or execute every step interactively right below in Panel 2**:"
+        )
+        s_col1, s_col2, s_col3 = st.columns(3)
+        with s_col1:
+            with st.container(border=True):
+                st.markdown("**1. Inspect Entity State via Resource**")
+                st.caption("`dd://entities/ent_apex_01/latest-report`")
+                st.write(
+                    "Reads the structured JSON dossier directly from the server without hallucinating."
+                )
+        with s_col2:
+            with st.container(border=True):
+                st.markdown("**2. Trigger an Injected Risk Event via Tool**")
+                st.caption("`simulate_monitoring_event`")
+                st.write(
+                    "Injects either Dmitri Kovalev sanctions (`5_silent_ubo_sanctions`, Jev `0.97` → auto-trigger) "
+                    "or ambiguous media (`4_ambiguous_media`, Jev `0.68` → triage queue)."
+                )
+        with s_col3:
+            with st.container(border=True):
+                st.markdown("**3. Autonomous Triage & Approval**")
+                st.caption("`dd://monitoring/triage-queue` → `approve_report_refresh`")
+                st.write(
+                    "Inspects queued alerts, verifies materiality score, and triggers System 2 synthesis for an upgraded v2/v3 report."
+                )
+
+    col1, col2 = st.columns([1, 1])
+
+    with col1:
+        st.subheader("1. Inspect Discovered MCP Primitives")
+        if st.button(
+            "🔍 Run MCP Handshake & Discover Tools", use_container_width=True
+        ):
+
+            async def discover():
+                async with sse_client(MCP_URL) as (read_stream, write_stream):
+                    async with ClientSession(read_stream, write_stream) as session:
+                        await session.initialize()
+                        tools = await session.list_tools()
+                        resources = await session.list_resources()
+                        templates = await session.list_resource_templates()
+                        return tools, resources, templates
+
+            with st.spinner(f"Connecting to MCP SSE endpoint ({MCP_URL})..."):
+                try:
+                    tools, resources, templates = asyncio.run(discover())
+                    st.success("✅ MCP Handshake Successful!")
+
+                    st.markdown("##### 🛠️ Registered Tools:")
+                    for t in tools.tools:
+                        st.code(f"Tool: {t.name}\nDescription: {t.description}")
+
+                    st.markdown("##### 📑 Registered Resources & Templates:")
+                    for r in resources.resources:
+                        st.code(f"URI: {r.uri}\nName: {r.name}")
+                    template_list = getattr(
+                        templates,
+                        "resource_templates",
+                        getattr(templates, "resourceTemplates", []),
+                    )
+                    for rt in template_list:
+                        uri_tmpl = getattr(
+                            rt, "uri_template", getattr(rt, "uriTemplate", "")
+                        )
+                        st.code(f"URI Template: {uri_tmpl}\nName: {rt.name}")
+                except Exception as e:
+                    st.error(f"Failed to connect to MCP Server: {e}")
+
+    with col2:
+        st.subheader("2. Execute 3-Step Demo Actions via MCP")
+        action = st.selectbox(
+            "Select Agent MCP Action",
+            list(MCP_DEMO_STEPS.keys()),
+        )
+
+        step_meta = MCP_DEMO_STEPS[action]
+        with st.container(border=True):
+            st.markdown("**💬 Equivalent Agent Prompt:**")
+            st.code(step_meta["prompt"], language="markdown")
+            st.markdown(f"**⚙️ What the MCP Client does:** {step_meta['what_it_does']}")
+            st.caption(f"JSON-RPC Method: `{step_meta['rpc_summary']}`")
+
+        if st.button(
+            "🚀 Execute MCP Call", use_container_width=True, type="primary"
+        ):
+
+            async def execute():
+                async with sse_client(MCP_URL) as (read_stream, write_stream):
+                    async with ClientSession(read_stream, write_stream) as session:
+                        await session.initialize()
+                        if "latest-report" in action:
+                            return await session.read_resource(
+                                "dd://entities/ent_apex_01/latest-report"
+                            )
+                        elif "5_silent_ubo_sanctions" in action:
+                            return await session.call_tool(
+                                "simulate_monitoring_event",
+                                arguments={
+                                    "scenario_preset": "5_silent_ubo_sanctions",
+                                    "entity_id": "ent_apex_01",
+                                },
+                            )
+                        elif "4_ambiguous_media" in action:
+                            return await session.call_tool(
+                                "simulate_monitoring_event",
+                                arguments={
+                                    "scenario_preset": "4_ambiguous_media",
+                                    "entity_id": "ent_apex_01",
+                                },
+                            )
+                        elif "triage-queue" in action:
+                            return await session.read_resource(
+                                "dd://monitoring/triage-queue"
+                            )
+                        elif "approve_report_refresh" in action:
+                            return await session.call_tool(
+                                "approve_report_refresh",
+                                arguments={"entity_id": "ent_apex_01"},
+                            )
+
+            with st.spinner("Executing JSON-RPC over SSE..."):
+                try:
+                    result = asyncio.run(execute())
+                    st.success("JSON-RPC 2.0 Response Received:")
+                    st.json(_format_mcp_result(result))
+                except Exception as e:
+                    st.error(f"Execution error: {e}")
+
+
+# =====================================================================
 # MULTI-PAGE NAVIGATION ROUTER
 # =====================================================================
 
@@ -1051,6 +1565,28 @@ page_dashboard = st.Page(
 page_research = st.Page(
     render_research_page, title="Research & Product Decisions", icon="📐"
 )
+page_guide_claude = st.Page(
+    render_claude_cursor_guide,
+    title="Guide: Claude & Cursor (Option 1)",
+    icon="🔌",
+)
+page_mcp = st.Page(
+    render_mcp_demo_page, title="Console: MCP Agent (Option 2)", icon="🤖"
+)
+page_guide_inspector = st.Page(
+    render_mcp_inspector_guide,
+    title="Guide: MCP Inspector (Option 3)",
+    icon="🔬",
+)
 
-nav = st.navigation({"pKYC Prototype": [page_home, page_dashboard, page_research]})
+nav = st.navigation(
+    {
+        "Sandbox Core": [page_home, page_dashboard, page_research],
+        "MCP Integration Guides": [
+            page_guide_claude,
+            page_mcp,
+            page_guide_inspector,
+        ],
+    }
+)
 nav.run()

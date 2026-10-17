@@ -994,6 +994,15 @@ async def onboard_live_entity(req: OnboardLiveRequest):
     return {"entity_id": new_id, "entity": entity}
 
 
+# Handler for POST /mcp/sse: prevents HTTP 405 Method Not Allowed when clients probe with HTTP-first
+@app.post("/mcp/sse")
+async def handle_mcp_sse_post():
+    raise HTTPException(
+        status_code=404,
+        detail="The /mcp/sse endpoint is a Server-Sent Events (SSE) stream requiring HTTP GET. Connect using SSE, or pass '--transport sse-only' to mcp-remote.",
+    )
+
+
 # Mount the FastMCP SSE app at /mcp so MCP clients can connect at /mcp/sse alongside REST
 app.mount("/mcp", mcp.sse_app(transport_security=MCP_TRANSPORT_SECURITY))
 
