@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Dict, List, Literal, Optional
@@ -141,6 +142,7 @@ class OnboardLiveRequest(BaseModel):
     company_name: str
     company_number: Optional[str] = None
     jurisdiction: str = "GB"
+    session_id: Optional[str] = None
 
 
 # =====================================================================
@@ -152,6 +154,8 @@ class SandboxStore:
     def __init__(self):
         self.policy = PolicyThresholds()
         self.entities: Dict[str, MonitoredEntity] = {}
+        self.last_active: Dict[str, float] = {}
+        self.golden_baseline: Optional[MonitoredEntity] = None
         # Synchronous seed for initial boot
         self._build_golden_persona()
 
@@ -201,16 +205,58 @@ class SandboxStore:
             audit_citations=baseline_records,
         )
 
-        self.entities = {
-            "ent_apex_01": MonitoredEntity(
-                entity_id="ent_apex_01",
-                name="Apex Global Logistics Ltd",
-                company_number="10928374",
-                jurisdiction="GB",
-                known_officers=["Sterling Vance (DOB: 1978-04)"],
-                reports=[baseline_report],
-            )
-        }
+        self.golden_baseline = MonitoredEntity(
+            entity_id="ent_apex_01",
+            name="Apex Global Logistics Ltd",
+            company_number="10928374",
+            jurisdiction="GB",
+            known_officers=["Sterling Vance (DOB: 1978-04)"],
+            reports=[baseline_report],
+        )
+
+        if "ent_apex_01" not in self.entities:
+            self.entities["ent_apex_01"] = self.golden_baseline.model_copy(deep=True)
+            self.last_active["ent_apex_01"] = time.time()
+
+    async def get_or_create_entity(self, entity_id: str) -> Optional[MonitoredEntity]:
+        """
+        Retrieves an entity or lazily clones the golden persona for a session-scoped ID.
+        Session entity IDs follow the pattern: s_{session_id}_{entity_key} (e.g. s_a1b2c3_ent_apex_01)
+        """
+        await self.load_or_seed()
+        if entity_id in self.entities:
+            self.last_active[entity_id] = time.time()
+            return self.entities[entity_id]
+
+        # Check if this is a session-scoped entity based on the golden baseline
+        if entity_id.startswith("s_") and "apex_01" in entity_id:
+            cloned = self.golden_baseline.model_copy(deep=True)
+            cloned.entity_id = entity_id
+            self.entities[entity_id] = cloned
+            self.last_active[entity_id] = time.time()
+            await self.save()
+            return cloned
+
+        if entity_id == "ent_apex_01":
+            cloned = self.golden_baseline.model_copy(deep=True)
+            self.entities["ent_apex_01"] = cloned
+            self.last_active[entity_id] = time.time()
+            await self.save()
+            return cloned
+
+        return None
+
+    def _prune_expired_sessions(self, ttl_seconds: float = 48 * 3600):
+        """Removes session-scoped entities that have been inactive for > ttl_seconds."""
+        now = time.time()
+        expired = [
+            k
+            for k, last_ts in self.last_active.items()
+            if k.startswith("s_") and (now - last_ts) > ttl_seconds
+        ]
+        for k in expired:
+            self.entities.pop(k, None)
+            self.last_active.pop(k, None)
 
     async def load_or_seed(self):
         """Asynchronous state loader using Modal's .aio interface."""
@@ -225,14 +271,62 @@ class SandboxStore:
                     self.entities = {
                         k: MonitoredEntity(**v) for k, v in entities_data.items()
                     }
+                    if "ent_apex_01" not in self.entities:
+                        self.entities["ent_apex_01"] = (
+                            self.golden_baseline.model_copy(deep=True)
+                        )
+                        self.last_active["ent_apex_01"] = time.time()
                     return
             except Exception:
                 pass
         await self.seed_golden_persona(persist=True)
 
+    async def reset_session(
+        self, session_id: Optional[str] = None, entity_id: Optional[str] = None
+    ):
+        """
+        Scoped reset:
+        - If session_id provided: only resets entities belonging to s_{session_id}_*
+        - If entity_id provided and starts with 's_': only resets that specific entity
+        - If entity_id == 'ent_apex_01' or neither provided: only resets default 'ent_apex_01'
+        Other active user sessions are never wiped!
+        """
+        await self.load_or_seed()
+        target_keys = set()
+        if session_id:
+            prefix = f"s_{session_id}_"
+            for k in list(self.entities.keys()):
+                if k.startswith(prefix) or k == session_id:
+                    target_keys.add(k)
+            # Ensure the session's default apex entity is in target_keys
+            target_keys.add(f"s_{session_id}_ent_apex_01")
+        elif entity_id:
+            target_keys.add(entity_id)
+        else:
+            target_keys.add("ent_apex_01")
+
+        for k in target_keys:
+            if k == "ent_apex_01":
+                self.entities["ent_apex_01"] = self.golden_baseline.model_copy(
+                    deep=True
+                )
+                self.last_active["ent_apex_01"] = time.time()
+            elif k.startswith("s_") and "apex_01" in k:
+                cloned = self.golden_baseline.model_copy(deep=True)
+                cloned.entity_id = k
+                self.entities[k] = cloned
+                self.last_active[k] = time.time()
+            else:
+                self.entities.pop(k, None)
+                self.last_active.pop(k, None)
+
+        await self.save()
+
     async def clear_and_seed(self):
         """Forces an absolute wipe of remote state and reseeds baseline."""
         self.policy = PolicyThresholds()
+        self.entities = {}
+        self.last_active = {}
         self._build_golden_persona()
         if MODAL_STATE is not None:
             try:
@@ -247,7 +341,8 @@ class SandboxStore:
                 print(f"[Clear & Seed Error]: {e}")
 
     async def save(self):
-        """Asynchronous state saver using Modal's .aio interface."""
+        """Asynchronous state saver using Modal's .aio interface with TTL pruning."""
+        self._prune_expired_sessions()
         if MODAL_STATE is not None:
             try:
                 await MODAL_STATE.put.aio("policy", self.policy.model_dump())
@@ -630,8 +725,7 @@ async def synthesize_updated_report(
 
 
 async def process_incoming_delta(req: InjectDeltaRequest) -> dict:
-    await STORE.load_or_seed()
-    entity = STORE.entities.get(req.entity_id)
+    entity = await STORE.get_or_create_entity(req.entity_id)
     if not entity:
         raise HTTPException(status_code=404, detail=f"Entity {req.entity_id} not found")
 
@@ -738,8 +832,7 @@ mcp = MCPServer("Xapien-pKYC-Sandbox")
 @mcp.resource("dd://entities/{entity_id}/latest-report")
 async def mcp_get_latest_report(entity_id: str) -> str:
     """Returns the latest structured Due Diligence report and citation trail for an entity."""
-    await STORE.load_or_seed()
-    entity = STORE.entities.get(entity_id)
+    entity = await STORE.get_or_create_entity(entity_id)
     if not entity:
         return f"Error: Entity {entity_id} not found."
     return entity.reports[-1].model_dump_json(indent=2)
@@ -769,10 +862,9 @@ async def mcp_get_triage_queue() -> str:
 async def get_latest_report(entity_id: str = "ent_apex_01") -> dict:
     """
     Fetches the latest structured Due Diligence report, risk score, executive summary,
-    and known officers for an entity.
+    and known officers for an entity. Accepts default 'ent_apex_01' or session-scoped IDs (e.g. 's_a1b2c3_ent_apex_01').
     """
-    await STORE.load_or_seed()
-    entity = STORE.entities.get(entity_id)
+    entity = await STORE.get_or_create_entity(entity_id)
     if not entity:
         return {"error": f"Entity {entity_id} not found."}
     return {
@@ -786,18 +878,20 @@ async def get_latest_report(entity_id: str = "ent_apex_01") -> dict:
 
 
 @mcp.tool()
-async def get_triage_queue() -> dict:
+async def get_triage_queue(session_id: Optional[str] = None) -> dict:
     """
     Returns all monitored entities with pending material alerts awaiting report refresh approval.
+    Optionally filter by session_id.
     """
     await STORE.load_or_seed()
     queue = {}
     for eid, ent in STORE.entities.items():
         if ent.pending_refresh_events:
-            queue[eid] = {
-                "entity_name": ent.name,
-                "pending_events": [e.model_dump() for e in ent.pending_refresh_events],
-            }
+            if not session_id or eid == "ent_apex_01" or eid.startswith(f"s_{session_id}_"):
+                queue[eid] = {
+                    "entity_name": ent.name,
+                    "pending_events": [e.model_dump() for e in ent.pending_refresh_events],
+                }
     return queue
 
 
@@ -834,13 +928,13 @@ async def approve_report_refresh(entity_id: str = "ent_apex_01") -> dict:
     Triggers the System 2 LLM to synthesize a new report version incorporating all pending
     material events in the entity's triage queue.
     """
-    await STORE.load_or_seed()
-    entity = STORE.entities.get(entity_id)
+    entity = await STORE.get_or_create_entity(entity_id)
     if not entity or not entity.pending_refresh_events:
         return {"status": "No pending events require report synthesis."}
     events_to_fold = list(entity.pending_refresh_events)
     entity.pending_refresh_events.clear()
     new_report = await synthesize_updated_report(entity, events_to_fold)
+    await STORE.save()
     return {
         "status": f"Report upgraded to v{new_report.version}",
         "new_report": new_report.model_dump(),
@@ -853,23 +947,27 @@ async def approve_report_refresh(entity_id: str = "ent_apex_01") -> dict:
 
 
 @app.get("/api/v1/entities")
-async def list_entities():
+async def list_entities(session_id: Optional[str] = None):
     await STORE.load_or_seed()
-    return {
-        eid: {
-            "name": e.name,
-            "company_number": e.company_number,
-            "jurisdiction": e.jurisdiction,
-        }
-        for eid, e in STORE.entities.items()
-    }
+    if session_id:
+        target_id = f"s_{session_id}_ent_apex_01"
+        await STORE.get_or_create_entity(target_id)
+
+    filtered = {}
+    for eid, e in STORE.entities.items():
+        if not session_id or eid == "ent_apex_01" or eid.startswith(f"s_{session_id}_"):
+            filtered[eid] = {
+                "name": e.name,
+                "company_number": e.company_number,
+                "jurisdiction": e.jurisdiction,
+            }
+    return filtered
 
 
 @app.get("/api/v1/entities/{entity_id}/report", response_model=DueDiligenceReport)
 async def get_latest_report(entity_id: str = "ent_apex_01"):
     """Fetch the latest synthesized Due Diligence report for an entity."""
-    await STORE.load_or_seed()
-    entity = STORE.entities.get(entity_id)
+    entity = await STORE.get_or_create_entity(entity_id)
     if not entity:
         raise HTTPException(status_code=404, detail="Entity not found")
     return entity.reports[-1]
@@ -878,8 +976,7 @@ async def get_latest_report(entity_id: str = "ent_apex_01"):
 @app.get("/api/v1/entities/{entity_id}/events")
 async def get_monitoring_stream(entity_id: str = "ent_apex_01"):
     """Returns every weekly delta evaluated by Jev (including discarded false positives) + cost telemetry."""
-    await STORE.load_or_seed()
-    entity = STORE.entities.get(entity_id)
+    entity = await STORE.get_or_create_entity(entity_id)
     if not entity:
         raise HTTPException(status_code=404, detail="Entity not found")
     return {
@@ -905,8 +1002,7 @@ async def inject_sandbox_delta(req: InjectDeltaRequest):
 )
 async def approve_pending_refresh(entity_id: str = "ent_apex_01"):
     """Approves pending Tier-2 alerts and runs the System 2 LLM to produce a new report version."""
-    await STORE.load_or_seed()
-    entity = STORE.entities.get(entity_id)
+    entity = await STORE.get_or_create_entity(entity_id)
     if not entity:
         raise HTTPException(status_code=404, detail="Entity not found")
     if not entity.pending_refresh_events:
@@ -915,7 +1011,9 @@ async def approve_pending_refresh(entity_id: str = "ent_apex_01"):
         )
     events_to_fold = list(entity.pending_refresh_events)
     entity.pending_refresh_events.clear()
-    return await synthesize_updated_report(entity, events_to_fold)
+    new_report = await synthesize_updated_report(entity, events_to_fold)
+    await STORE.save()
+    return new_report
 
 
 @app.put("/api/v1/sandbox/policy-thresholds", response_model=PolicyThresholds)
@@ -928,17 +1026,23 @@ async def update_policy_thresholds(new_policy: PolicyThresholds):
 
 
 @app.post("/api/v1/sandbox/reset")
-async def reset_sandbox():
-    """Resets the sandbox back to the clean v1 baseline report and clears Modal Dict state."""
-    await STORE.clear_and_seed()
-    return {"status": "Sandbox reset to v1 baseline."}
+async def reset_sandbox(
+    session_id: Optional[str] = None, entity_id: Optional[str] = None
+):
+    """
+    Resets sandbox state back to the clean v1 baseline report.
+    If session_id or entity_id is specified, only resets that specific scope,
+    leaving other users' sessions completely safe!
+    """
+    await STORE.reset_session(session_id=session_id, entity_id=entity_id)
+    scope = session_id or entity_id or "default"
+    return {"status": f"Sandbox reset to v1 baseline for scope: {scope}."}
 
 
 @app.post("/api/v1/entities/{entity_id}/poll-live-feeds")
 async def poll_live_entity_feeds(entity_id: str = "ent_apex_01", timespan: str = "1w"):
     """Polls live UK Companies House, OpenSanctions, and GDELT feeds and filters through Jev."""
-    await STORE.load_or_seed()
-    entity = STORE.entities.get(entity_id)
+    entity = await STORE.get_or_create_entity(entity_id)
     if not entity:
         raise HTTPException(status_code=404, detail="Entity not found")
 
@@ -978,7 +1082,8 @@ async def poll_live_entity_feeds(entity_id: str = "ent_apex_01", timespan: str =
 async def onboard_live_entity(req: OnboardLiveRequest):
     """Onboards a real-world company using live feeds and extracts real PSCs/UBOs for Jev disambiguation."""
     await STORE.load_or_seed()
-    new_id = f"ent_{uuid.uuid4().hex[:6]}"
+    prefix = f"s_{req.session_id}_" if req.session_id else ""
+    new_id = f"{prefix}ent_{uuid.uuid4().hex[:6]}"
 
     async with httpx.AsyncClient(timeout=15.0) as client:
         (ch_records, discovered_ubos), gdelt_records = await asyncio.gather(
@@ -1032,6 +1137,8 @@ async def onboard_live_entity(req: OnboardLiveRequest):
         reports=[base_rep],
     )
     STORE.entities[new_id] = entity
+    if req.session_id:
+        STORE.last_active[req.session_id] = time.time()
     await STORE.save()
     return {"entity_id": new_id, "entity": entity}
 

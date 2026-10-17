@@ -1,6 +1,8 @@
 import asyncio
 import json
 import os
+import re
+import uuid
 import streamlit as st
 import httpx
 import pandas as pd
@@ -13,10 +15,9 @@ API_BASE = os.getenv("SANDBOX_API_BASE", "http://127.0.0.1:8000/api/v1").rstrip(
 API_ROOT = API_BASE.replace("/api/v1", "")
 MCP_URL = os.getenv("SANDBOX_MCP_URL", f"{API_ROOT}/mcp/sse")
 DOCS_URL = os.getenv("SANDBOX_DOCS_URL", f"{API_ROOT}/docs")
-ENTITY_ID = "ent_apex_01"
 
 st.set_page_config(
-    page_title="Xapien + Jev pKYC Sandbox",
+    page_title="pKYC Sandbox",
     page_icon="🛡️",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -36,8 +37,25 @@ def st_mermaid(mermaid_code: str, height: int = 620):
     components.html(html, height=height, scrolling=True)
 
 
-if "active_entity_id" not in st.session_state:
-    st.session_state["active_entity_id"] = "ent_apex_01"
+# Multi-User Session Isolation & URL Query Param Initialization
+query_session = st.query_params.get("session")
+if query_session:
+    session_id = re.sub(r"[^a-zA-Z0-9_-]", "", query_session).strip().lower()[:16]
+    if not session_id:
+        session_id = uuid.uuid4().hex[:6]
+else:
+    session_id = st.session_state.get("session_id") or uuid.uuid4().hex[:6]
+
+st.session_state["session_id"] = session_id
+st.query_params["session"] = session_id
+
+SESSION_DEFAULT_ENTITY = f"s_{session_id}_ent_apex_01"
+
+if "session_initialized" not in st.session_state:
+    st.session_state["session_initialized"] = True
+    st.session_state["active_entity_id"] = SESSION_DEFAULT_ENTITY
+elif "active_entity_id" not in st.session_state:
+    st.session_state["active_entity_id"] = SESSION_DEFAULT_ENTITY
 
 if "last_api_error" not in st.session_state:
     st.session_state["last_api_error"] = None
@@ -57,10 +75,11 @@ def _extract_error_detail(res: httpx.Response) -> str:
     return res.text
 
 
-def api_get_entities():
+def api_get_entities(session_id: str = None):
     try:
+        params = {"session_id": session_id} if session_id else {}
         with httpx.Client(timeout=10.0) as client:
-            res = client.get(f"{API_BASE}/entities")
+            res = client.get(f"{API_BASE}/entities", params=params)
             res.raise_for_status()
             return res.json()
     except Exception as e:
@@ -121,16 +140,21 @@ def api_poll_live_feeds(entity_id: str, timespan: str = "1w"):
         return None
 
 
-def api_onboard_live(company_name: str, company_number: str = None):
+def api_onboard_live(
+    company_name: str, company_number: str = None, session_id: str = None
+):
     try:
+        payload = {
+            "company_name": company_name,
+            "company_number": company_number or None,
+            "jurisdiction": "GB",
+        }
+        if session_id:
+            payload["session_id"] = session_id
         with httpx.Client(timeout=30.0) as client:
             res = client.post(
                 f"{API_BASE}/entities/onboard-live",
-                json={
-                    "company_name": company_name,
-                    "company_number": company_number or None,
-                    "jurisdiction": "GB",
-                },
+                json=payload,
             )
             if res.status_code != 200:
                 st.session_state["last_api_error"] = (
@@ -176,15 +200,29 @@ def api_update_policy(policy_dict: dict):
         return None
 
 
-def api_reset_sandbox():
-    with httpx.Client(timeout=10.0) as client:
-        client.post(f"{API_BASE}/sandbox/reset")
-    st.session_state["active_entity_id"] = "ent_apex_01"
-    st.session_state["last_api_error"] = None
-    # Clear any Streamlit memo/session caches if present
-    for key in list(st.session_state.keys()):
-        if key not in ("active_entity_id", "last_api_error"):
-            del st.session_state[key]
+def api_reset_sandbox(session_id: str = None, entity_id: str = None):
+    try:
+        params = {}
+        if session_id:
+            params["session_id"] = session_id
+        if entity_id:
+            params["entity_id"] = entity_id
+        with httpx.Client(timeout=10.0) as client:
+            client.post(f"{API_BASE}/sandbox/reset", params=params)
+        default_entity = f"s_{session_id}_ent_apex_01" if session_id else "ent_apex_01"
+        st.session_state["active_entity_id"] = default_entity
+        st.session_state["last_api_error"] = None
+        # Clear any cached view keys
+        for key in list(st.session_state.keys()):
+            if key not in (
+                "session_id",
+                "session_initialized",
+                "active_entity_id",
+                "last_api_error",
+            ):
+                del st.session_state[key]
+    except Exception as e:
+        st.session_state["last_api_error"] = f"Reset Failed: {e}"
 
 
 # =====================================================================
@@ -649,9 +687,16 @@ def render_research_page():
 
 
 def render_dashboard_page():
-    entities_map = api_get_entities()
+    session_id = st.session_state.get("session_id")
+    entities_map = api_get_entities(session_id=session_id)
+    default_session_entity = (
+        f"s_{session_id}_ent_apex_01" if session_id else "ent_apex_01"
+    )
     if st.session_state["active_entity_id"] not in entities_map:
-        st.session_state["active_entity_id"] = "ent_apex_01"
+        if default_session_entity in entities_map:
+            st.session_state["active_entity_id"] = default_session_entity
+        else:
+            st.session_state["active_entity_id"] = list(entities_map.keys())[0]
 
     ENTITY_ID = st.session_state["active_entity_id"]
     report, stream_data = api_get_state(ENTITY_ID)
@@ -661,21 +706,63 @@ def render_dashboard_page():
     audit_events = stream_data["audit_event_stream"]
 
     # =====================================================================
-    # SIDEBAR: ENTITY SWITCHER, SANDBOX INJECTOR, LIVE POLL & SLIDERS
+    # SIDEBAR: WORKSPACE SESSION, ENTITY SWITCHER, SANDBOX INJECTOR, LIVE POLL & SLIDERS
     # =====================================================================
 
     with st.sidebar:
         st.title("🎛️ Sandbox Control Deck")
 
-        # 1. Select Monitored Company (Golden Persona or Onboarded Live Company)
+        # 0. Multi-User Workspace Session Card
+        with st.container(border=True):
+            st.markdown(f"**👤 Session Workspace:** `{session_id}`")
+            st.caption("All simulations and resets are isolated to your workspace.")
+            with st.expander("Switch or Name Workspace", expanded=False):
+                custom_session = st.text_input(
+                    "Workspace Key",
+                    value=session_id,
+                    max_chars=16,
+                    help="Alphanumeric, dash, or underscore. e.g. 'alice', 'demo1', or 6-hex default.",
+                    key="custom_session_input",
+                )
+                if st.button(
+                    "Switch Workspace",
+                    use_container_width=True,
+                    key="btn_switch_workspace",
+                ):
+                    clean_s = (
+                        re.sub(r"[^a-zA-Z0-9_-]", "", custom_session)
+                        .strip()
+                        .lower()[:16]
+                    )
+                    if clean_s and clean_s != session_id:
+                        st.query_params["session"] = clean_s
+                        st.session_state["session_id"] = clean_s
+                        st.session_state["active_entity_id"] = (
+                            f"s_{clean_s}_ent_apex_01"
+                        )
+                        st.rerun()
+
+        # 1. Select Monitored Company (Workspace Entity, Golden Baseline, or Onboarded Live Company)
         entity_options = list(entities_map.keys())
+
+        def format_entity_label(eid: str) -> str:
+            info = entities_map.get(eid, {})
+            name = info.get("name", eid)
+            company_num = info.get("company_number", "")
+            num_str = (
+                f" ({company_num})" if company_num and company_num != "N/A" else ""
+            )
+            if session_id and eid == f"s_{session_id}_ent_apex_01":
+                return f"⭐ {name}{num_str} — [My Workspace]"
+            elif eid == "ent_apex_01":
+                return f"🏛️ {name}{num_str} — [Golden Baseline]"
+            return f"🏢 {name}{num_str}"
+
         selected_eid = st.selectbox(
             "🏢 Active Monitored Entity",
             options=entity_options,
-            index=entity_options.index(ENTITY_ID),
-            format_func=lambda eid: (
-                f"{entities_map[eid]['name']} ({entities_map[eid]['company_number']})"
-            ),
+            index=entity_options.index(ENTITY_ID) if ENTITY_ID in entity_options else 0,
+            format_func=format_entity_label,
         )
         if selected_eid != ENTITY_ID:
             st.session_state["active_entity_id"] = selected_eid
@@ -711,7 +798,9 @@ def render_dashboard_page():
                 with st.spinner(
                     f"Fetching Companies House PSCs, OpenSanctions & GDELT for {live_name}..."
                 ):
-                    created = api_onboard_live(live_name, live_num)
+                    created = api_onboard_live(
+                        live_name, live_num, session_id=session_id
+                    )
                     if created and "entity_id" in created:
                         st.session_state["active_entity_id"] = created["entity_id"]
                 st.rerun()
@@ -875,8 +964,9 @@ def render_dashboard_page():
                 st.rerun()
 
         st.divider()
-        if st.button("🔄 Reset Sandbox to v1 Baseline", use_container_width=True):
-            api_reset_sandbox()
+        if st.button("🔄 Reset My Workspace to v1 Baseline", use_container_width=True):
+            api_reset_sandbox(session_id=session_id, entity_id=ENTITY_ID)
+            st.toast("Reset your workspace to clean v1 baseline!", icon="🔄")
             st.rerun()
 
     # =====================================================================
@@ -1128,8 +1218,8 @@ def render_claude_cursor_guide():
 
         st.warning(
             "⚠️ **Important JSON Schema Requirement:**  \n"
-            "`\"mcpServers\"` MUST be declared at the **root level** of `claude_desktop_config.json`. "
-            "If it is placed inside a `\"preferences\"` block or in general app preferences files, "
+            '`"mcpServers"` MUST be declared at the **root level** of `claude_desktop_config.json`. '
+            'If it is placed inside a `"preferences"` block or in general app preferences files, '
             "Claude Desktop will silently ignore the MCP configuration!"
         )
 
@@ -1155,14 +1245,14 @@ def render_claude_cursor_guide():
             "the **🔨 hammer icon** will appear showing your 3 registered tools (`simulate_monitoring_event`, `poll_live_open_data`, and `approve_report_refresh`)."
         )
 
-        with st.expander("ℹ️ Notes on Alternative Claude Desktop Connection Methods", expanded=False):
-            st.markdown(
-                """
+        with st.expander(
+            "ℹ️ Notes on Alternative Claude Desktop Connection Methods", expanded=False
+        ):
+            st.markdown("""
                 - **Why raw `"type": "sse"` fails:** Claude Desktop does not support direct network URLs (`"type": "sse"`) in `claude_desktop_config.json` — it only accepts `command` and `args` to spawn local bridge processes like `mcp-remote`. (In contrast, Cursor and Windsurf support direct SSE URLs natively).
                 - **Why the in-app 'Connectors' Dialog fails:** Claude's experimental in-app Connectors dialog is designed exclusively for enterprise endpoints with OAuth 2.0 discovery (`/.well-known/oauth-protected-resource`). When pointed to an unauthenticated sandbox server, it returns status 404 and demands sign-in.
                 - **Recommendation:** Use the verified `mcp-remote` config above for Claude Desktop, or use **Cursor IDE (Tab 2)** which natively connects to SSE URLs without any Node.js bridge.
-                """
-            )
+                """)
 
     with tab_cursor:
         st.markdown("### Step 1: Configure Cursor MCP Settings")
@@ -1186,7 +1276,9 @@ def render_claude_cursor_guide():
         )
 
     with tab_prompts:
-        st.markdown("### 🎬 The 3-Step Demo Script (Works in Any MCP Client / Agent Console)")
+        st.markdown(
+            "### 🎬 The 3-Step Demo Script (Works in Any MCP Client / Agent Console)"
+        )
         st.markdown(
             "Run the following prompts in any MCP-enabled AI assistant (Claude Desktop, Cursor, Windsurf, etc.) "
             "or execute the equivalent calls directly in **Option 2 (MCP Agent Console)** to showcase the autonomous workflow:"
@@ -1197,24 +1289,28 @@ def render_claude_cursor_guide():
             p1 = "Can you inspect the latest due diligence report for Apex Global Logistics (ent_apex_01) and summarize its current risk level and officers?"
             st.code(p1, language="markdown")
             st.markdown(
-                "**What the Agent does:** Calls `get_latest_report(entity_id=\"ent_apex_01\")` (or reads resource "
+                '**What the Agent does:** Calls `get_latest_report(entity_id="ent_apex_01")` (or reads resource '
                 "`dd://entities/ent_apex_01/latest-report`) to load the structured report and citations directly into context without hallucinating."
             )
 
         with st.container(border=True):
             st.markdown("#### Step 2: Trigger an Injected Risk Event via Tool")
-            st.markdown("**Option A — Critical UBO Sanctions Hit (Auto-Triggers System 2 Report):**")
+            st.markdown(
+                "**Option A — Critical UBO Sanctions Hit (Auto-Triggers System 2 Report):**"
+            )
             p2a = "Simulate what happens if a new PSC named Dmitri Kovalev is added and matched to sanctions using your simulation tool."
             st.code(p2a, language="markdown")
             st.markdown(
-                "**What the Agent does:** Calls `simulate_monitoring_event(scenario_preset=\"5_silent_ubo_sanctions\", entity_id=\"ent_apex_01\")`, "
+                '**What the Agent does:** Calls `simulate_monitoring_event(scenario_preset="5_silent_ubo_sanctions", entity_id="ent_apex_01")`, '
                 "inspects Jev’s `0.97` score and the `AUTO_TRIGGER_SYSTEM2_REPORT` action, and explains why the System 1 gatekeeper escalated it automatically."
             )
-            st.markdown("**Option B — Ambiguous Adverse Media (Routes to Triage Queue for Step 3):**")
+            st.markdown(
+                "**Option B — Ambiguous Adverse Media (Routes to Triage Queue for Step 3):**"
+            )
             p2b = "Use your simulate_monitoring_event tool with scenario_preset='4_ambiguous_media' on ent_apex_01. What did Jev score the materiality and what action was taken?"
             st.code(p2b, language="markdown")
             st.markdown(
-                "**What the Agent does:** Calls `simulate_monitoring_event(scenario_preset=\"4_ambiguous_media\", entity_id=\"ent_apex_01\")`, "
+                '**What the Agent does:** Calls `simulate_monitoring_event(scenario_preset="4_ambiguous_media", entity_id="ent_apex_01")`, '
                 "inspects Jev’s `0.68` score and the `QUEUE_FOR_ANALYST_REVIEW` action, and notes that it awaits approval in the triage queue."
             )
 
@@ -1224,7 +1320,7 @@ def render_claude_cursor_guide():
             st.code(p3, language="markdown")
             st.markdown(
                 "**What the Agent does:** Calls `get_triage_queue()` (or reads `dd://monitoring/triage-queue`), notes the materiality score, "
-                "invokes `approve_report_refresh(entity_id=\"ent_apex_01\")`, and reports back the newly synthesized v2 or v3 dossier."
+                'invokes `approve_report_refresh(entity_id="ent_apex_01")`, and reports back the newly synthesized v2 or v3 dossier.'
             )
 
 
@@ -1235,13 +1331,11 @@ def render_mcp_inspector_guide():
         "Zero-code developer visualizer to debug SSE connection health, test tool schemas, and read resources."
     )
 
-    st.markdown(
-        """
+    st.markdown("""
         The **[MCP Inspector](https://github.com/modelcontextprotocol/inspector)** is the reference developer tool 
         maintained by the Model Context Protocol project. It lets anyone inspect JSON-RPC payloads, validate tool schemas, 
         and test live endpoints in a web browser without setting up Claude Desktop.
-        """
-    )
+        """)
 
     st.info(
         f"**Active MCP SSE Endpoint:** `{MCP_URL}`  \n"
@@ -1287,14 +1381,12 @@ def render_mcp_inspector_guide():
             )
 
     st.markdown("### Step 3: What to Test During a Demo")
-    st.markdown(
-        """
+    st.markdown("""
         1. Select **Tools** → `simulate_monitoring_event`.
         2. Set `scenario_preset` to `5_silent_ubo_sanctions` and click **Run Tool**.
         3. Switch to **Resources** / **Resource Templates** → enter `dd://entities/ent_apex_01/latest-report` and click **Read Resource**.
         4. Point out that the report immediately auto-regenerated to **v2 (CRITICAL RISK)** because Jev scored the sanctions hit above `0.88`.
-        """
-    )
+        """)
 
 
 # =====================================================================
@@ -1381,9 +1473,7 @@ MCP_DEMO_STEPS = {
         "rpc_summary": "tools/call → get_triage_queue()",
     },
     "Step 3a (Alt) — Check Triage Queue: Read Resource dd://monitoring/triage-queue": {
-        "prompt": (
-            "Read raw resource dd://monitoring/triage-queue."
-        ),
+        "prompt": ("Read raw resource dd://monitoring/triage-queue."),
         "what_it_does": (
             "Reads the `dd://monitoring/triage-queue` JSON resource directly from the server."
         ),
@@ -1409,12 +1499,10 @@ def render_mcp_demo_page():
         "Demonstrating real-time Tool Calling & Resource Subscriptions over Model Context Protocol (SSE)."
     )
 
-    st.markdown(
-        f"""
+    st.markdown(f"""
         This console connects directly as a live Python MCP client (`mcp.client.sse.sse_client`) to the FastMCP SSE endpoint:
         `{MCP_URL}`
-        """
-    )
+        """)
 
     with st.expander("🎬 View the 3-Step Autonomous Agent Demo Script", expanded=False):
         st.markdown(
@@ -1425,7 +1513,9 @@ def render_mcp_demo_page():
         with s_col1:
             with st.container(border=True):
                 st.markdown("**1. Inspect Entity State via Tool / Resource**")
-                st.caption("`get_latest_report` or `dd://entities/ent_apex_01/latest-report`")
+                st.caption(
+                    "`get_latest_report` or `dd://entities/ent_apex_01/latest-report`"
+                )
                 st.write(
                     "Reads the structured JSON dossier directly from the server without hallucinating."
                 )
@@ -1449,9 +1539,7 @@ def render_mcp_demo_page():
 
     with col1:
         st.subheader("1. Inspect Discovered MCP Primitives")
-        if st.button(
-            "🔍 Run MCP Handshake & Discover Tools", use_container_width=True
-        ):
+        if st.button("🔍 Run MCP Handshake & Discover Tools", use_container_width=True):
 
             async def discover():
                 async with sse_client(MCP_URL) as (read_stream, write_stream):
@@ -1489,6 +1577,18 @@ def render_mcp_demo_page():
 
     with col2:
         st.subheader("2. Execute 3-Step Demo Actions via MCP")
+        session_id = st.session_state.get("session_id")
+        workspace_eid = f"s_{session_id}_ent_apex_01" if session_id else "ent_apex_01"
+        target_entity = st.selectbox(
+            "Target Entity Scope for MCP Calls",
+            options=[workspace_eid, "ent_apex_01"] if session_id else ["ent_apex_01"],
+            format_func=lambda e: (
+                f"⭐ My Isolated Workspace ({e})"
+                if e.startswith("s_")
+                else f"🏛️ Golden Baseline Template ({e})"
+            ),
+            help="Execute the MCP call against your isolated workspace entity or the shared baseline template.",
+        )
         action = st.selectbox(
             "Select Agent MCP Action",
             list(MCP_DEMO_STEPS.keys()),
@@ -1501,9 +1601,7 @@ def render_mcp_demo_page():
             st.markdown(f"**⚙️ What the MCP Client does:** {step_meta['what_it_does']}")
             st.caption(f"JSON-RPC Method: `{step_meta['rpc_summary']}`")
 
-        if st.button(
-            "🚀 Execute MCP Call", use_container_width=True, type="primary"
-        ):
+        if st.button("🚀 Execute MCP Call", use_container_width=True, type="primary"):
 
             async def execute():
                 async with sse_client(MCP_URL) as (read_stream, write_stream):
@@ -1512,18 +1610,21 @@ def render_mcp_demo_page():
                         if "Tool get_latest_report" in action:
                             return await session.call_tool(
                                 "get_latest_report",
-                                arguments={"entity_id": "ent_apex_01"},
+                                arguments={"entity_id": target_entity},
                             )
-                        elif "Read Resource dd://entities" in action or "latest-report" in action:
+                        elif (
+                            "Read Resource dd://entities" in action
+                            or "latest-report" in action
+                        ):
                             return await session.read_resource(
-                                "dd://entities/ent_apex_01/latest-report"
+                                f"dd://entities/{target_entity}/latest-report"
                             )
                         elif "5_silent_ubo_sanctions" in action:
                             return await session.call_tool(
                                 "simulate_monitoring_event",
                                 arguments={
                                     "scenario_preset": "5_silent_ubo_sanctions",
-                                    "entity_id": "ent_apex_01",
+                                    "entity_id": target_entity,
                                 },
                             )
                         elif "4_ambiguous_media" in action:
@@ -1531,11 +1632,16 @@ def render_mcp_demo_page():
                                 "simulate_monitoring_event",
                                 arguments={
                                     "scenario_preset": "4_ambiguous_media",
-                                    "entity_id": "ent_apex_01",
+                                    "entity_id": target_entity,
                                 },
                             )
                         elif "Tool get_triage_queue" in action:
-                            return await session.call_tool("get_triage_queue")
+                            args = {}
+                            if target_entity.startswith("s_") and session_id:
+                                args["session_id"] = session_id
+                            return await session.call_tool(
+                                "get_triage_queue", arguments=args
+                            )
                         elif "triage-queue" in action:
                             return await session.read_resource(
                                 "dd://monitoring/triage-queue"
@@ -1543,7 +1649,7 @@ def render_mcp_demo_page():
                         elif "approve_report_refresh" in action:
                             return await session.call_tool(
                                 "approve_report_refresh",
-                                arguments={"entity_id": "ent_apex_01"},
+                                arguments={"entity_id": target_entity},
                             )
 
             with st.spinner("Executing JSON-RPC over SSE..."):
