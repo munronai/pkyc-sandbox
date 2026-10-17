@@ -18,12 +18,7 @@ image = (
 #     TYPESAFE_API_KEY="your_jev_key" \
 #     COMPANIES_HOUSE_API_KEY="your_ch_key" \
 #     OPENSANCTIONS_API_KEY="your_os_key"
-# Then set USE_MODAL_SECRETS=1 when deploying, or uncomment the secret below.
-SANDBOX_SECRETS = (
-    [modal.Secret.from_name("xapien-sandbox-secrets")]
-    if os.getenv("USE_MODAL_SECRETS") == "1"
-    else []
-)
+SANDBOX_SECRETS = [modal.Secret.from_name("xapien-sandbox-secrets")]
 
 
 # 1. Public REST API (/docs, /api/v1/*) + FastMCP Endpoint (/mcp/sse)
@@ -39,6 +34,7 @@ def api():
 # 2. Public Streamlit Dashboard UI (Dynamically discovers the `api` Modal URL)
 @app.function(
     image=image,
+    secrets=SANDBOX_SECRETS,
     max_containers=1,  # Sticky session for Streamlit WebSockets
     scaledown_window=300,
 )
@@ -50,7 +46,7 @@ def dashboard():
 
     env = os.environ.copy()
     env["SANDBOX_API_BASE"] = f"{api_root_url}/api/v1"
-    env["SANDBOX_MCP_URL"] = f"{api_root_url}/mcp/sse"
+    env["SANDBOX_MCP_URL"] = f"{api_root_url}/sse"
     env["SANDBOX_DOCS_URL"] = f"{api_root_url}/docs"
 
     subprocess.Popen(
