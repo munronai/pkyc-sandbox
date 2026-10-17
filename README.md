@@ -10,6 +10,8 @@ A sandbox prototype demonstrating **Perpetual KYC (pKYC)** and continuous monito
 
 The platform provides a **FastAPI REST API**, an integrated **Model Context Protocol (MCP)** server over Server-Sent Events (SSE), and an interactive **Streamlit Dashboard** complete with live telemetry, scenario injectors, and an embedded MCP test console.
 
+:link: [Click for live demo](https://mrmunro--munron-pkyc-sandbox-dashboard.us-east.modal.run/)
+
 ---
 
 ## 🏛️ System Architecture
@@ -232,7 +234,7 @@ Edit `~/.cursor/mcp.json` (or go to **Cursor Settings** → **Features** → **M
 Debug JSON-RPC traffic, inspect schemas, and test tools in a standalone web visualizer:
 
 ```bash
-npx @modelcontextprotocol/inspector https://mrmunro--munron-pkyc-sandbox-api.us-east.modal.run/mcp/sse
+npx @modelcontextprotocol/inspector@latest https://mrmunro--munron-pkyc-sandbox-api.us-east.modal.run/mcp/sse
 ```
 * In the Inspector sidebar, verify **Transport Type** is set to **SSE** and click **Connect**.
 
