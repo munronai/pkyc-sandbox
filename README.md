@@ -6,7 +6,7 @@
 [![Modal](https://img.shields.io/badge/Modal-Serverless-black.svg)](https://modal.com/)
 [![Streamlit](https://img.shields.io/badge/Streamlit-1.42+-FF4B4B.svg)](https://streamlit.io/)
 
-A production-grade sandbox prototype demonstrating **Perpetual KYC (pKYC)** and continuous monitoring. The system uses a fast **System 1 Gatekeeper (Jev)** to evaluate multi-source feed deltas (corporate registry filings, sanctions watchlists, adverse media) and decide in sub-second time whether newly surfaced information warrants triggering an expensive **System 2 LLM-driven due diligence report refresh**.
+A sandbox prototype demonstrating **Perpetual KYC (pKYC)** and continuous monitoring. The system uses a fast **System 1 Gatekeeper (Jev)** to evaluate multi-source feed deltas (corporate registry filings, sanctions watchlists, adverse media) and decide in sub-second time whether newly surfaced information warrants triggering an expensive **System 2 LLM-driven due diligence report refresh**.
 
 The platform provides a **FastAPI REST API**, an integrated **Model Context Protocol (MCP)** server over Server-Sent Events (SSE), and an interactive **Streamlit Dashboard** complete with live telemetry, scenario injectors, and an embedded MCP test console.
 
