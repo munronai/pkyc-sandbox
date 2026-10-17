@@ -200,16 +200,38 @@ def api_update_policy(policy_dict: dict):
         return None
 
 
-def api_reset_sandbox(session_id: str = None, entity_id: str = None):
+def api_reset_sandbox(
+    session_id: str = None,
+    entity_id: str = None,
+    reset_all: bool = False,
+    admin_key: str = None,
+):
     try:
-        params = {}
-        if session_id:
-            params["session_id"] = session_id
-        if entity_id:
-            params["entity_id"] = entity_id
+        payload = {}
+        if reset_all:
+            payload["all"] = True
+        elif entity_id:
+            payload["entity_id"] = entity_id
+        elif session_id:
+            payload["session_id"] = session_id
+
+        if admin_key:
+            payload["admin_key"] = admin_key
+
         with httpx.Client(timeout=10.0) as client:
-            client.post(f"{API_BASE}/sandbox/reset", params=params)
-        default_entity = f"s_{session_id}_ent_apex_01" if session_id else "ent_apex_01"
+            res = client.post(f"{API_BASE}/sandbox/reset", json=payload)
+            if res.status_code != 200:
+                st.session_state["last_api_error"] = (
+                    f"Reset Error ({res.status_code}): {_extract_error_detail(res)}"
+                )
+                return None
+
+        if reset_all:
+            default_entity = "ent_apex_01"
+        else:
+            default_entity = entity_id or (
+                f"s_{session_id}_ent_apex_01" if session_id else "ent_apex_01"
+            )
         st.session_state["active_entity_id"] = default_entity
         st.session_state["last_api_error"] = None
         # Clear any cached view keys
@@ -221,8 +243,10 @@ def api_reset_sandbox(session_id: str = None, entity_id: str = None):
                 "last_api_error",
             ):
                 del st.session_state[key]
+        return res.json()
     except Exception as e:
         st.session_state["last_api_error"] = f"Reset Failed: {e}"
+        return None
 
 
 # =====================================================================
@@ -964,10 +988,58 @@ def render_dashboard_page():
                 st.rerun()
 
         st.divider()
-        if st.button("🔄 Reset My Workspace to v1 Baseline", use_container_width=True):
-            api_reset_sandbox(session_id=session_id, entity_id=ENTITY_ID)
-            st.toast("Reset your workspace to clean v1 baseline!", icon="🔄")
-            st.rerun()
+        if ENTITY_ID == "ent_apex_01":
+            st.markdown("##### 🏛️ Reset Golden Baseline")
+            st.caption("Admin key required to restore the shared Golden Baseline to clean v1.")
+            baseline_admin_key = st.text_input(
+                "Admin Secret Key",
+                type="password",
+                placeholder="Enter admin key to unlock...",
+                key="baseline_admin_key",
+                help="Key defined in SANDBOX_ADMIN_KEY or Modal secrets",
+            )
+            if st.button(
+                "🔄 Reset Golden Baseline (ent_apex_01) to Clean v1",
+                use_container_width=True,
+                type="primary",
+            ):
+                if not baseline_admin_key.strip():
+                    st.error("Admin secret key is required.")
+                else:
+                    res = api_reset_sandbox(
+                        entity_id="ent_apex_01", admin_key=baseline_admin_key.strip()
+                    )
+                    if res is not None:
+                        st.toast("Reset Golden Baseline to clean v1 (Low Risk)!", icon="🏛️")
+                        st.rerun()
+        else:
+            if st.button("🔄 Reset My Workspace to v1 Baseline", use_container_width=True):
+                res = api_reset_sandbox(session_id=session_id, entity_id=ENTITY_ID)
+                if res is not None:
+                    st.toast("Reset your workspace to clean v1 baseline!", icon="🔄")
+                    st.rerun()
+
+        with st.expander("⚙️ System Admin Reset", expanded=False):
+            st.caption(
+                "Perform a total wipe of remote state (clears persistent Modal store and resets all sessions to clean v1)."
+            )
+            sys_admin_key = st.text_input(
+                "System Admin Key",
+                type="password",
+                placeholder="Enter admin key...",
+                key="sys_admin_key",
+                help="Key defined in SANDBOX_ADMIN_KEY or Modal secrets",
+            )
+            if st.button("⚠️ Full System Wipe & Reset All", use_container_width=True):
+                if not sys_admin_key.strip():
+                    st.error("Admin secret key is required for a full system wipe.")
+                else:
+                    res = api_reset_sandbox(
+                        reset_all=True, admin_key=sys_admin_key.strip()
+                    )
+                    if res is not None:
+                        st.toast("Full system wipe completed!", icon="🧹")
+                        st.rerun()
 
     # =====================================================================
     # NON-BLOCKING ERROR BANNER (KEEPS DASHBOARD USABLE ON API FAILURE)

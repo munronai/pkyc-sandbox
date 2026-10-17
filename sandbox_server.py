@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Literal, Optional
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel, Field
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
@@ -20,8 +20,9 @@ from live_feeds import (
     fetch_opensanctions,
 )
 
-# Load local .env file if present (for TYPESAFE_API_KEY, etc.)
+# Load local .env file if present (for TYPESAFE_API_KEY, SANDBOX_ADMIN_KEY, etc.)
 load_dotenv()
+ADMIN_KEY = os.getenv("SANDBOX_ADMIN_KEY", "xapien-pkyc-admin-2026")
 
 app = FastAPI(title="Xapien + Jev pKYC Simulation Sandbox", version="2.0.0")
 
@@ -143,6 +144,13 @@ class OnboardLiveRequest(BaseModel):
     company_number: Optional[str] = None
     jurisdiction: str = "GB"
     session_id: Optional[str] = None
+
+
+class ResetSandboxRequest(BaseModel):
+    session_id: Optional[str] = None
+    entity_id: Optional[str] = None
+    all: bool = False
+    admin_key: Optional[str] = None
 
 
 # =====================================================================
@@ -293,7 +301,9 @@ class SandboxStore:
         """
         await self.load_or_seed()
         target_keys = set()
-        if session_id:
+        if entity_id == "ent_apex_01":
+            target_keys.add("ent_apex_01")
+        elif session_id:
             prefix = f"s_{session_id}_"
             for k in list(self.entities.keys()):
                 if k.startswith(prefix) or k == session_id:
@@ -1027,15 +1037,38 @@ async def update_policy_thresholds(new_policy: PolicyThresholds):
 
 @app.post("/api/v1/sandbox/reset")
 async def reset_sandbox(
-    session_id: Optional[str] = None, entity_id: Optional[str] = None
+    req: Optional[ResetSandboxRequest] = None,
+    session_id: Optional[str] = None,
+    entity_id: Optional[str] = None,
+    all: bool = False,
+    x_admin_key: Optional[str] = Header(None, alias="X-Admin-Key"),
 ):
     """
     Resets sandbox state back to the clean v1 baseline report.
-    If session_id or entity_id is specified, only resets that specific scope,
-    leaving other users' sessions completely safe!
+    - If all=True: clears persistent Modal state and reseeds baseline from scratch (requires admin_key).
+    - If entity_id='ent_apex_01': restores golden baseline to clean v1 low risk (requires admin_key).
+    - If session_id provided for a workspace entity: resets only that user's workspace (no admin_key needed).
     """
-    await STORE.reset_session(session_id=session_id, entity_id=entity_id)
-    scope = session_id or entity_id or "default"
+    target_session_id = (req.session_id if req else None) or session_id
+    target_entity_id = (req.entity_id if req else None) or entity_id
+    is_all = (req.all if req else False) or all
+    provided_key = (req.admin_key if req else None) or x_admin_key
+
+    # Admin key is strictly required if wiping everything or resetting the shared golden baseline ent_apex_01
+    requires_admin = is_all or (target_entity_id == "ent_apex_01") or (not target_session_id and not target_entity_id)
+    if requires_admin:
+        if not provided_key or provided_key != ADMIN_KEY:
+            raise HTTPException(
+                status_code=403,
+                detail="Forbidden: Valid 'admin_key' parameter required to reset the Golden Baseline or perform a full system wipe.",
+            )
+
+    if is_all:
+        await STORE.clear_and_seed()
+        return {"status": "Full system wipe completed. All entities and sessions reset to clean baseline."}
+
+    await STORE.reset_session(session_id=target_session_id, entity_id=target_entity_id)
+    scope = target_entity_id or target_session_id or "default"
     return {"status": f"Sandbox reset to v1 baseline for scope: {scope}."}
 
 

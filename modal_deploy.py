@@ -20,12 +20,13 @@ image = (
     .add_local_python_source("sandbox_server", "live_feeds", "sandbox_dashboard")
 )
 
-# Optional Modal Secret for Live Jev API, UK Companies House, and OpenSanctions keys:
-# Create once via CLI:
+# Optional Modal Secret for Live Jev API, UK Companies House, OpenSanctions, and Admin keys:
+# Create or update once via CLI:
 #   modal secret create xapien-sandbox-secrets \
 #     TYPESAFE_API_KEY="your_jev_key" \
 #     COMPANIES_HOUSE_API_KEY="your_ch_key" \
-#     OPENSANCTIONS_API_KEY="your_os_key"
+#     OPENSANCTIONS_API_KEY="your_os_key" \
+#     SANDBOX_ADMIN_KEY="your_admin_key"
 SANDBOX_SECRETS = [modal.Secret.from_name("xapien-sandbox-secrets")]
 
 
