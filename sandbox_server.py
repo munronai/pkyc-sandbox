@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import uuid
 from datetime import datetime, timezone
@@ -8,6 +9,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from mcp.server.mcpserver import MCPServer
+from mcp.server.transport_security import TransportSecuritySettings
 from fastapi.middleware.cors import CORSMiddleware
 from live_feeds import (
     FeedRecord,
@@ -701,6 +703,35 @@ def get_telemetry_summary(entity: MonitoredEntity) -> dict:
 # 7. FASTMCP SERVER SURFACE (RESOURCES & TOOLS FOR LLMs)
 # =====================================================================
 
+MODAL_API_HOST = os.getenv(
+    "SANDBOX_MODAL_HOST",
+    "mrmunro--munron-pkyc-sandbox-api.us-east.modal.run",
+)
+MODAL_DEV_HOST = "mrmunro--munron-pkyc-sandbox-api-dev.us-east.modal.run"
+
+MCP_TRANSPORT_SECURITY = TransportSecuritySettings(
+    enable_dns_rebinding_protection=True,
+    allowed_hosts=[
+        "127.0.0.1",
+        "127.0.0.1:*",
+        "localhost",
+        "localhost:*",
+        "[::1]",
+        "[::1]:*",
+        MODAL_API_HOST,
+        f"{MODAL_API_HOST}:*",
+        MODAL_DEV_HOST,
+        f"{MODAL_DEV_HOST}:*",
+    ],
+    allowed_origins=[
+        "http://127.0.0.1:*",
+        "http://localhost:*",
+        "http://[::1]:*",
+        f"https://{MODAL_API_HOST}",
+        f"https://{MODAL_DEV_HOST}",
+    ],
+)
+
 mcp = MCPServer("Xapien-pKYC-Sandbox")
 
 
@@ -725,7 +756,7 @@ async def mcp_get_triage_queue() -> str:
                 "entity_name": ent.name,
                 "pending_events": [e.model_dump() for e in ent.pending_refresh_events],
             }
-    return str(queue)
+    return json.dumps(queue, indent=2)
 
 
 @mcp.tool()
@@ -963,8 +994,8 @@ async def onboard_live_entity(req: OnboardLiveRequest):
     return {"entity_id": new_id, "entity": entity}
 
 
-# Mount the FastMCP SSE app at /mcp so MCP clients can connect over HTTP alongside REST
-app.mount("/mcp", mcp.sse_app())
+# Mount the FastMCP SSE app at /mcp so MCP clients can connect at /mcp/sse alongside REST
+app.mount("/mcp", mcp.sse_app(transport_security=MCP_TRANSPORT_SECURITY))
 
 if __name__ == "__main__":
     import uvicorn

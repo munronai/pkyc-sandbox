@@ -7,7 +7,15 @@ app = modal.App("munron-pkyc-sandbox")
 image = (
     modal.Image.debian_slim(python_version="3.12")
     .pip_install(
-        "fastapi", "uvicorn", "fastmcp", "httpx", "pydantic", "streamlit", "pandas"
+        "fastapi",
+        "uvicorn",
+        "fastmcp",
+        "mcp[cli]",
+        "httpx",
+        "pydantic",
+        "python-dotenv",
+        "streamlit",
+        "pandas",
     )
     .add_local_python_source("sandbox_server", "live_feeds", "sandbox_dashboard")
 )
@@ -46,7 +54,7 @@ def dashboard():
 
     env = os.environ.copy()
     env["SANDBOX_API_BASE"] = f"{api_root_url}/api/v1"
-    env["SANDBOX_MCP_URL"] = f"{api_root_url}/sse"
+    env["SANDBOX_MCP_URL"] = f"{api_root_url}/mcp/sse"
     env["SANDBOX_DOCS_URL"] = f"{api_root_url}/docs"
 
     subprocess.Popen(
