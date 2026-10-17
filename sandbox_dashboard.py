@@ -1108,31 +1108,17 @@ def render_claude_cursor_guide():
     )
 
     with tab_claude:
-        st.markdown("### Method 1: Claude Desktop 'Connectors' Dialog (Easiest — In-App GUI)")
+        st.markdown("### 🔌 Connecting Claude Desktop to Your MCP Server")
         st.markdown(
-            "Recent versions of Claude Desktop provide a built-in GUI to add remote MCP servers without manually editing JSON files:"
-        )
-        st.markdown(
-            f"""
-            1. Open Claude Desktop and go to **Settings** → **Connectors** (or **Integrations**).
-            2. Click **Add Connector** / **Add Custom Server**.
-            3. Paste your active MCP URL:
-            """
-        )
-        st.code(MCP_URL, language="bash")
-        st.info(
-            "ℹ️ **About the SSE Deprecation Warning in the Connectors Dialog:**  \n"
-            "Claude Desktop will show: *'This connector will use SSE transport, which is being deprecated. "
-            "If you maintain this server, consider switching to streamable HTTP.'*  \n"
-            "This is Anthropic's specification roadmap advisory (MCP 2024 spec uses SSE, while MCP 2025 roadmap "
-            "is introducing Streamable HTTP). SSE transport is fully operational, production-ready, and supported."
+            "Claude Desktop's configuration engine strictly requires **local `stdio` subprocesses** "
+            "(`command` + `args`). To connect Claude Desktop to a remote or local SSE endpoint, use the official "
+            "`mcp-remote` bridge with the `--transport sse-only` flag."
         )
 
-        st.divider()
-
-        st.markdown("### Method 2: Configure via `claude_desktop_config.json`")
+        st.markdown("#### Step 1: Open `claude_desktop_config.json`")
         st.markdown(
-            "Alternatively, you can configure Claude Desktop using the config file directly:"
+            "In Claude Desktop, click **Claude** (menu bar) → **Settings** → **Developer** → **Edit Config**, "
+            "or open the file directly:"
         )
         st.code(
             "# macOS:\n~/Library/Application Support/Claude/claude_desktop_config.json\n\n"
@@ -1143,32 +1129,17 @@ def render_claude_cursor_guide():
         st.warning(
             "⚠️ **Important JSON Schema Requirement:**  \n"
             "`\"mcpServers\"` MUST be declared at the **root level** of `claude_desktop_config.json`. "
-            "If it is nested inside a `\"preferences\"` dictionary or inside general app preferences files, "
-            "Claude Desktop will silently ignore the MCP tools!"
+            "If it is placed inside a `\"preferences\"` block or in general app preferences files, "
+            "Claude Desktop will silently ignore the MCP configuration!"
         )
 
-        claude_subtab_native, claude_subtab_bridge = st.tabs(
-            ["⚡ Native Remote SSE (Recommended)", "🌉 `mcp-remote` Stdio Bridge"]
+        st.markdown("#### Step 2: Add the `mcp-remote` Server Entry")
+        st.markdown(
+            "Copy and paste this exact configuration block. The `--transport sse-only` flag is mandatory to prevent "
+            "the bridge from attempting HTTP POST probes that trigger `HTTP 405 Method Not Allowed` errors:"
         )
 
-        with claude_subtab_native:
-            st.caption("Native direct SSE connection without external Node.js dependencies:")
-            claude_native_config = f"""{{
-  "mcpServers": {{
-    "xapien-pkyc-sandbox": {{
-      "type": "sse",
-      "url": "{MCP_URL}"
-    }}
-  }}
-}}"""
-            st.code(claude_native_config, language="json")
-
-        with claude_subtab_bridge:
-            st.caption(
-                "When using `mcp-remote`, pass `--transport sse-only` so the bridge does not attempt "
-                "HTTP POST probes that cause `HTTP 405 Method Not Allowed` errors:"
-            )
-            claude_bridge_config = f"""{{
+        claude_bridge_config = f"""{{
   "mcpServers": {{
     "xapien-pkyc-sandbox": {{
       "command": "npx",
@@ -1176,13 +1147,22 @@ def render_claude_cursor_guide():
     }}
   }}
 }}"""
-            st.code(claude_bridge_config, language="json")
+        st.code(claude_bridge_config, language="json")
 
-        st.markdown("### Step 3: Restart Claude Desktop")
+        st.markdown("#### Step 3: Restart Claude Desktop")
         st.markdown(
             "Quit and reopen Claude Desktop. Look at the bottom-right of the input box: "
             "the **🔨 hammer icon** will appear showing your 3 registered tools (`simulate_monitoring_event`, `poll_live_open_data`, and `approve_report_refresh`)."
         )
+
+        with st.expander("ℹ️ Notes on Alternative Claude Desktop Connection Methods", expanded=False):
+            st.markdown(
+                """
+                - **Why raw `"type": "sse"` fails:** Claude Desktop does not support direct network URLs (`"type": "sse"`) in `claude_desktop_config.json` — it only accepts `command` and `args` to spawn local bridge processes like `mcp-remote`. (In contrast, Cursor and Windsurf support direct SSE URLs natively).
+                - **Why the in-app 'Connectors' Dialog fails:** Claude's experimental in-app Connectors dialog is designed exclusively for enterprise endpoints with OAuth 2.0 discovery (`/.well-known/oauth-protected-resource`). When pointed to an unauthenticated sandbox server, it returns status 404 and demands sign-in.
+                - **Recommendation:** Use the verified `mcp-remote` config above for Claude Desktop, or use **Cursor IDE (Tab 2)** which natively connects to SSE URLs without any Node.js bridge.
+                """
+            )
 
     with tab_cursor:
         st.markdown("### Step 1: Configure Cursor MCP Settings")
@@ -1213,12 +1193,12 @@ def render_claude_cursor_guide():
         )
 
         with st.container(border=True):
-            st.markdown("#### Step 1: Inspect Entity State via Resource")
-            p1 = "Can you inspect the latest due diligence report for Apex Global Logistics (dd://entities/ent_apex_01/latest-report) and summarize its current risk level and officers?"
+            st.markdown("#### Step 1: Inspect Entity State via Tool or Resource")
+            p1 = "Can you inspect the latest due diligence report for Apex Global Logistics (ent_apex_01) and summarize its current risk level and officers?"
             st.code(p1, language="markdown")
             st.markdown(
-                "**What the Agent does:** Reads the structured JSON resource (`dd://entities/ent_apex_01/latest-report`) "
-                "directly from the MCP server without hallucinating."
+                "**What the Agent does:** Calls `get_latest_report(entity_id=\"ent_apex_01\")` (or reads resource "
+                "`dd://entities/ent_apex_01/latest-report`) to load the structured report and citations directly into context without hallucinating."
             )
 
         with st.container(border=True):
@@ -1240,10 +1220,10 @@ def render_claude_cursor_guide():
 
         with st.container(border=True):
             st.markdown("#### Step 3: Autonomous Triage & Approval")
-            p3 = "Check our monitoring triage queue (dd://monitoring/triage-queue). If there are any pending material alerts above 0.50 confidence, approve the report refresh and give me an updated risk summary."
+            p3 = "Check our monitoring triage queue. If there are any pending material alerts above 0.50 confidence, approve the report refresh and give me an updated risk summary."
             st.code(p3, language="markdown")
             st.markdown(
-                "**What the Agent does:** Inspects the queue (`dd://monitoring/triage-queue`), notes the materiality score, "
+                "**What the Agent does:** Calls `get_triage_queue()` (or reads `dd://monitoring/triage-queue`), notes the materiality score, "
                 "invokes `approve_report_refresh(entity_id=\"ent_apex_01\")`, and reports back the newly synthesized v2 or v3 dossier."
             )
 
@@ -1344,14 +1324,24 @@ def _format_mcp_result(result) -> dict:
 
 
 MCP_DEMO_STEPS = {
-    "Step 1 — Inspect Entity State: Read dd://entities/ent_apex_01/latest-report": {
+    "Step 1 — Inspect Entity State: Call Tool get_latest_report (ent_apex_01)": {
         "prompt": (
             "Can you inspect the latest due diligence report for Apex Global Logistics "
-            "(dd://entities/ent_apex_01/latest-report) and summarize its current risk level and officers?"
+            "(ent_apex_01) and summarize its current risk level and officers?"
+        ),
+        "what_it_does": (
+            "Calls `get_latest_report(entity_id='ent_apex_01')` directly. This is the model-controlled "
+            "tool path that works seamlessly across all AI clients (including Claude Desktop)."
+        ),
+        "rpc_summary": "tools/call → get_latest_report(entity_id='ent_apex_01')",
+    },
+    "Step 1 (Alt) — Inspect Entity State: Read Resource dd://entities/ent_apex_01/latest-report": {
+        "prompt": (
+            "Inspect the raw JSON resource at dd://entities/ent_apex_01/latest-report."
         ),
         "what_it_does": (
             "Reads the structured JSON resource (`dd://entities/ent_apex_01/latest-report`) "
-            "directly from the MCP server without hallucinating."
+            "directly from the MCP server without burning tool-calling tokens."
         ),
         "rpc_summary": "resources/read → dd://entities/ent_apex_01/latest-report",
     },
@@ -1379,14 +1369,23 @@ MCP_DEMO_STEPS = {
         ),
         "rpc_summary": "tools/call → simulate_monitoring_event(scenario_preset='4_ambiguous_media', entity_id='ent_apex_01')",
     },
-    "Step 3a — Check Triage Queue: Read dd://monitoring/triage-queue": {
+    "Step 3a — Check Triage Queue: Call Tool get_triage_queue": {
         "prompt": (
-            "Check our monitoring triage queue (dd://monitoring/triage-queue). If there are any pending "
-            "material alerts above 0.50 confidence, approve the report refresh and give me an updated risk summary."
+            "Check our monitoring triage queue. If there are any pending material alerts above 0.50 confidence, "
+            "approve the report refresh and give me an updated risk summary."
         ),
         "what_it_does": (
-            "Reads `dd://monitoring/triage-queue` to inspect pending medium-confidence alerts (`0.50 <= score < 0.88`) "
-            "and their materiality scores before invoking report refresh."
+            "Calls `get_triage_queue()` to inspect pending medium-confidence alerts (`0.50 <= score < 0.88`) "
+            "and their materiality scores."
+        ),
+        "rpc_summary": "tools/call → get_triage_queue()",
+    },
+    "Step 3a (Alt) — Check Triage Queue: Read Resource dd://monitoring/triage-queue": {
+        "prompt": (
+            "Read raw resource dd://monitoring/triage-queue."
+        ),
+        "what_it_does": (
+            "Reads the `dd://monitoring/triage-queue` JSON resource directly from the server."
         ),
         "rpc_summary": "resources/read → dd://monitoring/triage-queue",
     },
@@ -1425,8 +1424,8 @@ def render_mcp_demo_page():
         s_col1, s_col2, s_col3 = st.columns(3)
         with s_col1:
             with st.container(border=True):
-                st.markdown("**1. Inspect Entity State via Resource**")
-                st.caption("`dd://entities/ent_apex_01/latest-report`")
+                st.markdown("**1. Inspect Entity State via Tool / Resource**")
+                st.caption("`get_latest_report` or `dd://entities/ent_apex_01/latest-report`")
                 st.write(
                     "Reads the structured JSON dossier directly from the server without hallucinating."
                 )
@@ -1441,7 +1440,7 @@ def render_mcp_demo_page():
         with s_col3:
             with st.container(border=True):
                 st.markdown("**3. Autonomous Triage & Approval**")
-                st.caption("`dd://monitoring/triage-queue` → `approve_report_refresh`")
+                st.caption("`get_triage_queue` → `approve_report_refresh`")
                 st.write(
                     "Inspects queued alerts, verifies materiality score, and triggers System 2 synthesis for an upgraded v2/v3 report."
                 )
@@ -1510,7 +1509,12 @@ def render_mcp_demo_page():
                 async with sse_client(MCP_URL) as (read_stream, write_stream):
                     async with ClientSession(read_stream, write_stream) as session:
                         await session.initialize()
-                        if "latest-report" in action:
+                        if "Tool get_latest_report" in action:
+                            return await session.call_tool(
+                                "get_latest_report",
+                                arguments={"entity_id": "ent_apex_01"},
+                            )
+                        elif "Read Resource dd://entities" in action or "latest-report" in action:
                             return await session.read_resource(
                                 "dd://entities/ent_apex_01/latest-report"
                             )
@@ -1530,6 +1534,8 @@ def render_mcp_demo_page():
                                     "entity_id": "ent_apex_01",
                                 },
                             )
+                        elif "Tool get_triage_queue" in action:
+                            return await session.call_tool("get_triage_queue")
                         elif "triage-queue" in action:
                             return await session.read_resource(
                                 "dd://monitoring/triage-queue"

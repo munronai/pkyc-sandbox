@@ -745,6 +745,12 @@ async def mcp_get_latest_report(entity_id: str) -> str:
     return entity.reports[-1].model_dump_json(indent=2)
 
 
+@mcp.resource("dd://entities/ent_apex_01/latest-report")
+async def mcp_get_latest_report_apex() -> str:
+    """Returns the latest structured Due Diligence report for baseline entity Apex Global Logistics."""
+    return await mcp_get_latest_report("ent_apex_01")
+
+
 @mcp.resource("dd://monitoring/triage-queue")
 async def mcp_get_triage_queue() -> str:
     """Returns all monitored entities that have pending material updates awaiting report refresh approval."""
@@ -757,6 +763,42 @@ async def mcp_get_triage_queue() -> str:
                 "pending_events": [e.model_dump() for e in ent.pending_refresh_events],
             }
     return json.dumps(queue, indent=2)
+
+
+@mcp.tool()
+async def get_latest_report(entity_id: str = "ent_apex_01") -> dict:
+    """
+    Fetches the latest structured Due Diligence report, risk score, executive summary,
+    and known officers for an entity.
+    """
+    await STORE.load_or_seed()
+    entity = STORE.entities.get(entity_id)
+    if not entity:
+        return {"error": f"Entity {entity_id} not found."}
+    return {
+        "entity_id": entity.entity_id,
+        "name": entity.name,
+        "company_number": entity.company_number,
+        "jurisdiction": entity.jurisdiction,
+        "known_officers": entity.known_officers,
+        "latest_report": entity.reports[-1].model_dump(),
+    }
+
+
+@mcp.tool()
+async def get_triage_queue() -> dict:
+    """
+    Returns all monitored entities with pending material alerts awaiting report refresh approval.
+    """
+    await STORE.load_or_seed()
+    queue = {}
+    for eid, ent in STORE.entities.items():
+        if ent.pending_refresh_events:
+            queue[eid] = {
+                "entity_name": ent.name,
+                "pending_events": [e.model_dump() for e in ent.pending_refresh_events],
+            }
+    return queue
 
 
 @mcp.tool()
